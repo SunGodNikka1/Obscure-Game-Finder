@@ -42,11 +42,35 @@ if not exist "node_modules\" (
   echo  [OGF] Dependencies present - skipping npm install.
 )
 
-rem --- 3. Build ONLY when no production build exists -------------------------
-rem Delete the .next folder (or run "npm run build" yourself) to force a rebuild
-rem after changing the source.
+rem --- 3. Build only when there is no build or the build is STALE -----------
+rem A stamp file is written after every successful build. If any file under
+rem src\ (or package.json / package-lock.json / next.config.ts / tsconfig.json /
+rem postcss.config.mjs) is newer than that stamp, the sources changed since the
+rem last build and we rebuild; otherwise the existing build is reused.
+set "STAMP=.next\ogf-build.stamp"
+set "NEED_BUILD=0"
+set "BUILD_REASON="
 if not exist ".next\BUILD_ID" (
-  echo  [OGF] No production build found - running npm run build once...
+  set "NEED_BUILD=1"
+  set "BUILD_REASON=no production build found"
+)
+if "%NEED_BUILD%"=="0" if not exist "%STAMP%" (
+  set "NEED_BUILD=1"
+  set "BUILD_REASON=no build stamp found"
+)
+if "%NEED_BUILD%"=="0" (
+  for /f "usebackq delims=" %%f in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$stamp = (Get-Item '%STAMP%').LastWriteTimeUtc;" ^
+    "$files = @(Get-ChildItem -Path 'src' -Recurse -File);" ^
+    "foreach ($n in 'package.json','package-lock.json','next.config.ts','tsconfig.json','postcss.config.mjs') { if (Test-Path $n) { $files += Get-Item $n } };" ^
+    "$stale = $files | Where-Object { $_.LastWriteTimeUtc -gt $stamp } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1;" ^
+    "if ($stale) { Write-Output $stale.FullName }"`) do (
+    set "NEED_BUILD=1"
+    set "BUILD_REASON=changed since last build: %%f"
+  )
+)
+if "%NEED_BUILD%"=="1" (
+  echo  [OGF] Rebuilding - %BUILD_REASON%
   echo.
   call npm run build
   if errorlevel 1 (
@@ -55,9 +79,10 @@ if not exist ".next\BUILD_ID" (
     pause
     exit /b 1
   )
+  type nul > "%STAMP%"
   echo.
 ) else (
-  echo  [OGF] Production build present - skipping npm run build.
+  echo  [OGF] Production build is up to date - skipping npm run build.
 )
 
 rem --- 4. Do not start a second server on the same port ----------------------

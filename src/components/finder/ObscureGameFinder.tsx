@@ -326,6 +326,24 @@ export function ObscureGameFinder() {
     [flash, report, scanner],
   );
 
+  /**
+   * "Resume previous crawl": the crawl data is restored by the scanner, but the
+   * sidebar controls are ordinary component state and would otherwise stay at
+   * their defaults. Mirror the saved crawl into them first so the visible
+   * username / depth / source toggles match what is actually running, and so a
+   * later "Start Fresh" does not fail on a blank username field.
+   */
+  const restorePreviousCrawl = useCallback(() => {
+    const saved = scanner.restorable;
+    if (!saved) return;
+    setUsername(saved.username);
+    setDepth(-1);
+    setIncludeCreated(saved.sources.includeCreated);
+    setIncludeFavorites(saved.sources.includeFavorites);
+    setIncludeInventory(saved.sources.includeInventory);
+    void scanner.restoreAndResume();
+  }, [scanner]);
+
   const refreshArchive = useCallback(async () => {
     setArchiveSessions(null);
     try {
@@ -456,7 +474,7 @@ export function ObscureGameFinder() {
             <button
               type="button"
               className="btn btn-on flex-1 !py-[2px]"
-              onClick={() => void scanner.restoreAndResume()}
+              onClick={restorePreviousCrawl}
             >
               Resume previous crawl
             </button>
