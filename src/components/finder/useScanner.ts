@@ -790,8 +790,18 @@ export function useScanner() {
     await runContinuousLoop(activeRequestRef.current, true);
   }, [runContinuousLoop, scanning]);
 
-  /** Rehydrate a crawl saved in IndexedDB, then continue it. */
-  const restoreAndResume = useCallback(async () => {
+  /**
+   * Rehydrate a crawl saved in IndexedDB from the single persisted checkpoint.
+   *
+   * `resume: true`  -- restore, then continue crawling immediately (the
+   *                    original "Resume previous crawl" behaviour).
+   * `resume: false` -- restore ONLY: the app lands in the normal paused state
+   *                    (games, frontier, stats and budget all in place) with
+   *                    no network activity, and the ordinary Resume control
+   *                    continues from the same checkpoint later.
+   * Both paths share this one hydration; nothing is duplicated or re-saved.
+   */
+  const restorePreviousCrawl = useCallback(async ({ resume }: { resume: boolean }) => {
     const saved = restorable;
     if (!saved || scanning || continuousRunningRef.current) return;
 
@@ -837,6 +847,20 @@ export function useScanner() {
       "system",
       `Restored saved crawl · ${saved.games.length} games · frontier ${saved.frontier.length} · batch ${saved.batchNumber}.`,
     );
+
+    if (!resume) {
+      // Land in the same paused state Stop produces: no batch is requested,
+      // scanning stays false, and Resume picks up from this checkpoint.
+      continuousRunningRef.current = false;
+      userAbortRef.current = false;
+      setContinuousPaused(true);
+      log(
+        "system",
+        `Previous crawl restored · paused · frontier ${saved.frontier.length} users · next batch ${saved.batchNumber + 1}. Press Resume to continue.`,
+      );
+      return;
+    }
+
     await runContinuousLoop(request, true);
   }, [log, restorable, runContinuousLoop, scanning]);
 
@@ -862,7 +886,7 @@ export function useScanner() {
     start,
     abort,
     resumeContinuous,
-    restoreAndResume,
+    restorePreviousCrawl,
     discardRestorable,
   };
 }

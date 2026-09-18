@@ -298,7 +298,10 @@ exposes `[ 0 ] [ 1 ] [ 2 ] [ 3 ] [ ∞ ]`:
 - *Durable checkpoints.* After every committed batch the whole crawl (frontier, seen/completed
   ids, parent map, budget window, cumulative stats, batch number, games) is written to
   IndexedDB (`src/lib/persistence/crawlStore.ts`). On reload the sidebar offers
-  **Resume previous crawl** / **Discard** — it never resumes network activity on its own.
+  **Restore previous crawl** (load games / frontier / stats / controls from the checkpoint and
+  stay paused — zero requests; the normal **Resume** continues from it later),
+  **Resume previous crawl** (restore and continue immediately) and **Discard**. Both restore
+  buttons read the same saved checkpoint; the app never resumes network activity on its own.
 - *Cumulative batch number* survives Stop/Resume and reload.
 - *Truthful budget counters.* `HTTP` / `FriendList` are remaining tokens only. Import
   requests are counted under **requests made** and never added to the remaining budget.

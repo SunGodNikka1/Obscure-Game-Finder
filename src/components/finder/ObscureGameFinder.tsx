@@ -327,22 +327,27 @@ export function ObscureGameFinder() {
   );
 
   /**
-   * "Resume previous crawl": the crawl data is restored by the scanner, but the
-   * sidebar controls are ordinary component state and would otherwise stay at
-   * their defaults. Mirror the saved crawl into them first so the visible
-   * username / depth / source toggles match what is actually running, and so a
-   * later "Start Fresh" does not fail on a blank username field.
+   * "Restore previous crawl" / "Resume previous crawl": the crawl data is
+   * restored by the scanner, but the sidebar controls are ordinary component
+   * state and would otherwise stay at their defaults. Mirror the saved crawl
+   * into them first so the visible username / depth / source toggles match
+   * what was restored, and so a later "Start Fresh" does not fail on a blank
+   * username field. `resume` decides whether crawling continues immediately
+   * (Resume) or the app stays paused on the restored checkpoint (Restore).
    */
-  const restorePreviousCrawl = useCallback(() => {
-    const saved = scanner.restorable;
-    if (!saved) return;
-    setUsername(saved.username);
-    setDepth(-1);
-    setIncludeCreated(saved.sources.includeCreated);
-    setIncludeFavorites(saved.sources.includeFavorites);
-    setIncludeInventory(saved.sources.includeInventory);
-    void scanner.restoreAndResume();
-  }, [scanner]);
+  const recoverPreviousCrawl = useCallback(
+    (resume: boolean) => {
+      const saved = scanner.restorable;
+      if (!saved) return;
+      setUsername(saved.username);
+      setDepth(-1);
+      setIncludeCreated(saved.sources.includeCreated);
+      setIncludeFavorites(saved.sources.includeFavorites);
+      setIncludeInventory(saved.sources.includeInventory);
+      void scanner.restorePreviousCrawl({ resume });
+    },
+    [scanner],
+  );
 
   const refreshArchive = useCallback(async () => {
     setArchiveSessions(null);
@@ -473,19 +478,28 @@ export function ObscureGameFinder() {
           <div className="flex gap-2">
             <button
               type="button"
-              className="btn btn-on flex-1 !py-[2px]"
-              onClick={restorePreviousCrawl}
+              className="btn flex-1 !py-[2px]"
+              title="Load the saved crawl (games, frontier, stats) and stay paused — no requests are sent"
+              onClick={() => recoverPreviousCrawl(false)}
             >
-              Resume previous crawl
+              Restore previous crawl
             </button>
             <button
               type="button"
-              className="btn flex-1 !py-[2px]"
-              onClick={scanner.discardRestorable}
+              className="btn btn-on flex-1 !py-[2px]"
+              title="Load the saved crawl and continue crawling immediately"
+              onClick={() => recoverPreviousCrawl(true)}
             >
-              Discard
+              Resume previous crawl
             </button>
           </div>
+          <button
+            type="button"
+            className="btn w-full !py-[2px]"
+            onClick={scanner.discardRestorable}
+          >
+            Discard
+          </button>
         </div>
       ) : null}
 
@@ -500,8 +514,16 @@ export function ObscureGameFinder() {
             maxLength={32}
             onChange={(event) => setUsername(event.target.value)}
           />
+          {/*
+            Distinct keys matter: without them React reuses the same <button>
+            node when Resume flips to Stop mid-click, Chrome then evaluates the
+            activation behaviour on a node that is now type="submit", the form
+            submits with "Stop" as submitter, and the freshly resumed crawl is
+            aborted immediately.
+          */}
           {scanner.continuousPaused ? (
             <button
+              key="resume"
               type="button"
               className="btn btn-on w-24 shrink-0 glow-text"
               onClick={() => void scanner.resumeContinuous()}
@@ -511,6 +533,7 @@ export function ObscureGameFinder() {
             </button>
           ) : (
             <button
+              key="start-stop"
               type="submit"
               className={`btn w-24 shrink-0 ${scanner.scanning ? "btn-danger is-live" : "btn-on"}`}
               title={scanner.scanning ? "stop the current search" : "begin searching"}
