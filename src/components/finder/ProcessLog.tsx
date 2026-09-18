@@ -40,6 +40,11 @@ export function ProcessLog({
     box.scrollTop = box.scrollHeight;
   }, [logs]);
 
+  // Idle with nothing logged: collapse to a single status row instead of
+  // reserving the full scrollable log height. Any scan or any log line
+  // restores the normal box (auto-scroll, scrollbar, cursor row unchanged).
+  const active = scanning || logs.length > 0;
+
   return (
     <section className="flex min-h-0 flex-col">
       <div className="flex items-baseline justify-between">
@@ -70,7 +75,11 @@ export function ProcessLog({
           const el = event.currentTarget;
           stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 28;
         }}
-        className="panel-alt scroll-thin h-[164px] overflow-y-auto px-2 py-1.5 lg:h-[19vh] lg:min-h-[150px]"
+        className={
+          active
+            ? "panel-alt scroll-thin h-[164px] overflow-y-auto px-2 py-1.5 lg:h-[19vh] lg:min-h-[150px]"
+            : "panel-alt h-[42px] shrink-0 overflow-hidden px-2 py-1.5"
+        }
       >
         {logs.length === 0 ? (
           <p className="mono text-[var(--text-dim)]">
