@@ -80,12 +80,15 @@ export function ObscureGameFinder() {
   }, []);
 
   // Saved (starred) rows survive a reload for the lifetime of the browser session.
+  // Hydrating from sessionStorage must happen after mount (it does not exist on
+  // the server), so the setState-in-effect rule is a false positive here.
   useEffect(() => {
     try {
       const raw = window.sessionStorage.getItem("ogf.savedGames") ?? window.sessionStorage.getItem("ogf.highlighted");
       if (!raw) return;
       const parsed: unknown = JSON.parse(raw);
       if (Array.isArray(parsed)) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- SSR-safe hydration from sessionStorage
         setSaved(new Set(parsed.filter((value): value is number => typeof value === "number")));
       }
     } catch {

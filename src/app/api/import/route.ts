@@ -3,6 +3,7 @@ import { resolvePlaceToUniverse } from "@/lib/roblox/games";
 import { hydrateUniverses } from "@/lib/discovery/normalize";
 import { MAX_IMPORT_TOKENS, parseImportInput } from "@/lib/discovery/importParse";
 import type { DiscoveredGame, LogLevel } from "@/lib/discovery/types";
+import { enforceRateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +20,10 @@ interface ImportLog {
  * set when Roblox actually returns metadata for it.
  */
 export async function POST(request: Request): Promise<Response> {
+  // Optional, env-gated abuse protection for public deployments (see lib/rateLimit.ts).
+  const limited = await enforceRateLimit(request, "import");
+  if (limited) return limited;
+
   let body: unknown;
   try {
     body = await request.json();

@@ -405,16 +405,23 @@ export function useScanner() {
                 continue;
               }
               switch (event.type) {
-                case "log":
+                case "log": {
+                  // Build the entry OUTSIDE the updater: React batches queued
+                  // updaters, so reading seqRef inside them yields duplicate ids
+                  // (and duplicate React keys) for events sharing a millisecond.
                   seqRef.current += 1;
+                  const entry: ProcessLogEntry = {
+                    id: `${event.ts}-${seqRef.current}`,
+                    ts: event.ts,
+                    level: event.level,
+                    message: event.message,
+                  };
                   setLogs((prev) => {
-                    const next = [
-                      ...prev,
-                      { id: `${event.ts}-${seqRef.current}`, ts: event.ts, level: event.level, message: event.message },
-                    ];
+                    const next = [...prev, entry];
                     return next.length > MAX_LOGS ? next.slice(next.length - MAX_LOGS) : next;
                   });
                   break;
+                }
                 case "stats":
                   setStats((prev) => ({
                     ...prev,
@@ -701,16 +708,21 @@ export function useScanner() {
               continue;
             }
             switch (event.type) {
-              case "log":
+              case "log": {
+                // See the continuous loop: the entry must be built outside the updater.
                 seqRef.current += 1;
+                const entry: ProcessLogEntry = {
+                  id: `${event.ts}-${seqRef.current}`,
+                  ts: event.ts,
+                  level: event.level,
+                  message: event.message,
+                };
                 setLogs((prev) => {
-                  const next = [
-                    ...prev,
-                    { id: `${event.ts}-${seqRef.current}`, ts: event.ts, level: event.level, message: event.message },
-                  ];
+                  const next = [...prev, entry];
                   return next.length > MAX_LOGS ? next.slice(next.length - MAX_LOGS) : next;
                 });
                 break;
+              }
               case "stats":
                 setStats(event.stats);
                 break;

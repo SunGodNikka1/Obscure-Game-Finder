@@ -7,6 +7,7 @@ import { fetchUserPlaceInventoryPage } from "@/lib/roblox/inventory";
 import { getUsersByIds, resolveUsername, sanitizeUsername } from "@/lib/roblox/users";
 import { summarisePlayability } from "@/lib/playability";
 import { CONTINUOUS_CONFIG } from "@/lib/discovery/config";
+import { advanceInventoryListing } from "@/lib/discovery/inventoryPolicy";
 import { enforceRateLimit } from "@/lib/rateLimit";
 import {
   buildPlaceOnlyGame,
@@ -307,30 +308,27 @@ export async function POST(request: Request): Promise<Response> {
             emitStats();
           }
 
-          // ---- 3. Inventory: one page of places per visit ----
+          // ---- 3. Inventory: one page of places per visit (with backpressure) ----
+          // The cursor only advances after every id on a page is queued; when
+          // the queue cannot absorb a full page, fetching is deferred to a later
+          // visit and resumes from the same cursor. See discovery/inventoryPolicy.ts.
           const pending: number[] = Array.isArray(work.pendingPlaceIds) ? [...work.pendingPlaceIds] : [];
           if (payload.includeInventory && !work.inventoryDone) {
             try {
-              for (let i = 0; i < CONTINUOUS_CONFIG.INVENTORY_PAGES_PER_VISIT; i += 1) {
-                const page = await fetchUserPlaceInventoryPage(client, node.userId, work.inventoryCursor);
-                for (const entry of page.items) {
-                  if (
-                    pending.length < CONTINUOUS_CONFIG.MAX_PENDING_PLACES_PER_USER &&
-                    !pending.includes(entry.assetId)
-                  ) {
-                    pending.push(entry.assetId);
-                  }
-                }
-                work.inventoryCursor = page.nextCursor;
-                if (!page.nextCursor) {
-                  work.inventoryDone = true;
-                  break;
-                }
-              }
-              log(
-                "info",
-                `[INV] ${pending.length} place${pending.length === 1 ? "" : "s"} awaiting resolution${work.inventoryDone ? " · listing complete" : " · more pages pending"}`,
+              const visit = await advanceInventoryListing(work, pending, (cursor) =>
+                fetchUserPlaceInventoryPage(client, node.userId, cursor),
               );
+              if (visit.deferred && visit.pagesFetched === 0) {
+                log(
+                  "info",
+                  `[INV] queue at ${pending.length}/${CONTINUOUS_CONFIG.MAX_PENDING_PLACES_PER_USER} · deferring next page until resolved`,
+                );
+              } else {
+                log(
+                  "info",
+                  `[INV] ${pending.length} place${pending.length === 1 ? "" : "s"} awaiting resolution${work.inventoryDone ? " · listing complete" : " · more pages pending"}`,
+                );
+              }
             } catch (error) {
               if (isAbort(error)) throw error;
               work.inventoryDone = true;

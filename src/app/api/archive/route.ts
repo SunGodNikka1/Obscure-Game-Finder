@@ -1,12 +1,49 @@
-import { desc, eq } from "drizzle-orm";
+import { asc, count, desc, eq, inArray } from "drizzle-orm";
 import { db, isDatabaseConfigured } from "@/db";
 import { archivedGames, scanSessions } from "@/db/schema";
 import type { DiscoveredGame } from "@/lib/discovery/types";
+import { enforceRateLimit, type EnvLike } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_ARCHIVED_GAMES = 500;
+
+/**
+ * Hard ceiling on stored sessions so anonymous writes can never grow the
+ * database without bound. When reached, the OLDEST sessions are pruned
+ * (archived_games cascades) -- consistent with the UI, which only ever lists
+ * the 15 most recent sessions. Override with ARCHIVE_MAX_SESSIONS; 0 disables.
+ */
+const DEFAULT_ARCHIVE_MAX_SESSIONS = 200;
+
+function archiveMaxSessions(env: EnvLike = process.env): number {
+  const raw = env.ARCHIVE_MAX_SESSIONS;
+  if (raw === undefined || raw === "") return DEFAULT_ARCHIVE_MAX_SESSIONS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : DEFAULT_ARCHIVE_MAX_SESSIONS;
+}
+
+/** Deletes the oldest sessions so that at most `max - 1` remain (room for one insert). */
+async function pruneOldestSessions(max: number): Promise<number> {
+  if (max <= 0) return 0;
+  const [{ total }] = await db.select({ total: count() }).from(scanSessions);
+  const excess = Number(total) - (max - 1);
+  if (excess <= 0) return 0;
+  const oldest = await db
+    .select({ id: scanSessions.id })
+    .from(scanSessions)
+    .orderBy(asc(scanSessions.createdAt), asc(scanSessions.id))
+    .limit(excess);
+  if (oldest.length === 0) return 0;
+  await db.delete(scanSessions).where(
+    inArray(
+      scanSessions.id,
+      oldest.map((row) => row.id),
+    ),
+  );
+  return oldest.length;
+}
 
 /** GET /api/archive -> most recent saved scans */
 export async function GET(request: Request): Promise<Response> {
@@ -49,6 +86,11 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "Archive storage is not configured on this host" }, { status: 503 });
   }
 
+  // Optional, env-gated abuse protection for public deployments (see lib/rateLimit.ts).
+  // Archive writes get the tightest quota because each one persists up to 500 rows.
+  const limited = await enforceRateLimit(request, "archive");
+  if (limited) return limited;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -70,6 +112,11 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
+    const pruned = await pruneOldestSessions(archiveMaxSessions());
+    if (pruned > 0 && process.env.NODE_ENV !== "production") {
+      console.info(`[archive:post] pruned ${pruned} oldest session(s) to stay within ARCHIVE_MAX_SESSIONS`);
+    }
+
     const [session] = await db
       .insert(scanSessions)
       .values({

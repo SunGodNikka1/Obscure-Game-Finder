@@ -1,6 +1,7 @@
 import { runDiscovery } from "@/lib/discovery/engine";
 import { clampDepth } from "@/lib/discovery/config";
 import type { ScanEvent } from "@/lib/discovery/types";
+import { enforceRateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,6 +13,10 @@ export const dynamic = "force-dynamic";
  * Aborting the client fetch aborts the server-side crawl via `request.signal`.
  */
 export async function POST(request: Request): Promise<Response> {
+  // Optional, env-gated abuse protection for public deployments (see lib/rateLimit.ts).
+  const limited = await enforceRateLimit(request, "scan");
+  if (limited) return limited;
+
   let body: unknown;
   try {
     body = await request.json();

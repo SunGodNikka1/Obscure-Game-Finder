@@ -20,8 +20,15 @@ import { db, isDatabaseConfigured } from "@/db";
  *
  * ENABLING
  *   RATE_LIMIT_ENABLED=1                 # turn the limiter on
- *   RATE_LIMIT_WINDOW_SECONDS=60         # optional (default 60)
- *   RATE_LIMIT_MAX_REQUESTS=30           # optional (default 30) per route per window
+ *   RATE_LIMIT_WINDOW_SECONDS=60         # optional global default window
+ *   RATE_LIMIT_MAX_REQUESTS=30           # optional global default quota per route per window
+ *
+ * PER-ROUTE QUOTAS
+ *   Each protected route has its own default quota (see ROUTE_QUOTAS). Any of
+ *   them can be overridden with a route-suffixed variable, e.g.
+ *   RATE_LIMIT_MAX_REQUESTS_ARCHIVE=5 / RATE_LIMIT_WINDOW_SECONDS_ARCHIVE=3600
+ *   (route name upper-cased, "-" replaced by "_"). Route-suffixed variables win
+ *   over the global ones, which win over the built-in defaults.
  *
  * Requires the `rate_limit_hits` table (see `src/db/schema.ts`,
  * created with `npx drizzle-kit push`).
@@ -35,13 +42,53 @@ import { db, isDatabaseConfigured } from "@/db";
 const DEFAULT_WINDOW_SECONDS = 60;
 const DEFAULT_MAX_REQUESTS = 30;
 
+/** `process.env`-shaped input; kept loose so tests can pass plain objects. */
+export type EnvLike = Record<string, string | undefined>;
+
+export interface RouteQuota {
+  maxRequests: number;
+  windowSeconds: number;
+}
+
+/**
+ * Built-in per-route quotas. Sized to what a single honest browser session can
+ * plausibly do: a continuous batch takes ~30-50s, a finite scan up to ~110s,
+ * an import is a one-off paste, and an archive write stores up to 500 rows.
+ */
+export const ROUTE_QUOTAS: Readonly<Record<string, RouteQuota>> = {
+  "scan-batch": { maxRequests: 30, windowSeconds: 60 },
+  scan: { maxRequests: 10, windowSeconds: 60 },
+  import: { maxRequests: 20, windowSeconds: 60 },
+  archive: { maxRequests: 10, windowSeconds: 3600 },
+};
+
 export function isRateLimitEnabled(): boolean {
   return process.env.RATE_LIMIT_ENABLED === "1" && isDatabaseConfigured();
 }
 
-function readIntEnv(name: string, fallback: number): number {
-  const parsed = Number(process.env[name]);
+function readIntEnv(name: string, fallback: number, env: EnvLike = process.env): number {
+  const parsed = Number(env[name]);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+/** `scan-batch` -> `SCAN_BATCH`, used as the env-variable suffix. */
+function envSuffix(route: string): string {
+  return route.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+}
+
+/**
+ * Effective quota for a route: route-suffixed env > global env > built-in
+ * default for that route > module default. Pure; `env` is injectable for tests.
+ */
+export function resolveRouteQuota(route: string, env: EnvLike = process.env): RouteQuota {
+  const builtIn = ROUTE_QUOTAS[route];
+  const suffix = envSuffix(route);
+  const globalMax = readIntEnv("RATE_LIMIT_MAX_REQUESTS", builtIn?.maxRequests ?? DEFAULT_MAX_REQUESTS, env);
+  const globalWindow = readIntEnv("RATE_LIMIT_WINDOW_SECONDS", builtIn?.windowSeconds ?? DEFAULT_WINDOW_SECONDS, env);
+  return {
+    maxRequests: readIntEnv(`RATE_LIMIT_MAX_REQUESTS_${suffix}`, globalMax, env),
+    windowSeconds: readIntEnv(`RATE_LIMIT_WINDOW_SECONDS_${suffix}`, globalWindow, env),
+  };
 }
 
 /**
@@ -73,8 +120,7 @@ export interface RateLimitVerdict {
  * never read again and can be pruned lazily).
  */
 export async function checkRateLimit(request: Request, route: string): Promise<RateLimitVerdict> {
-  const windowSeconds = readIntEnv("RATE_LIMIT_WINDOW_SECONDS", DEFAULT_WINDOW_SECONDS);
-  const maxRequests = readIntEnv("RATE_LIMIT_MAX_REQUESTS", DEFAULT_MAX_REQUESTS);
+  const { windowSeconds, maxRequests } = resolveRouteQuota(route);
   const now = Date.now();
   const windowStart = Math.floor(now / (windowSeconds * 1000)) * windowSeconds * 1000;
   const identity = `${clientKey(request)}:${route}`;

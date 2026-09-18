@@ -19,7 +19,14 @@ cp .env.example .env        # if you don't already have .env (see below)
 npm run dev                 # http://localhost:3000
 ```
 
-Production:
+**Windows one-click launchers** (repository root):
+
+| File | What it does |
+| --- | --- |
+| `OGF.bat` | Development mode. Checks Node.js is installed, runs `npm install` **only** when `node_modules` is missing, starts `npm run dev`, waits until `localhost:3000` actually answers, then opens it in your browser. The server terminal stays open so errors are visible. Never runs `npm run build`. |
+| `OGF-Production.bat` | Production mode. Same install check, runs `npm run build` **only** when no `.next` build exists, then `npm start` and opens the browser. |
+
+Production (manual):
 
 ```bash
 npm run build
@@ -41,7 +48,7 @@ npx drizzle-kit push
 Everything except Archive works with the database offline — scan state lives in memory /
 session state in the browser.
 
-Useful scripts: `npm run typecheck`, `npm run lint`, `npm run build`.
+Useful scripts: `npm test` (Vitest unit tests), `npm run typecheck`, `npm run lint`, `npm run build`.
 
 ---
 
@@ -266,10 +273,18 @@ exposes `[ 0 ] [ 1 ] [ 2 ] [ 3 ] [ ∞ ]`:
 **Continuous ∞ correctness guarantees (Pass 2 repair).**
 - *Batch success is judged by `checkpoint.ok`, never by a checkpoint existing.* The server
   emits a checkpoint even on failure so partial progress survives; the client therefore
-  tracks `sawCheckpoint` and `batchSucceeded` separately. The decision lives in the pure,
-  unit-tested `src/lib/discovery/batchPolicy.ts` (`retry` → `retry` → `pause` at
-  `MAX_BATCH_ATTEMPTS`, exponential backoff 2s/4s/8s capped at 15s). The failure counter is
-  only reset by a genuine success.
+  tracks `sawCheckpoint` and `batchSucceeded` separately. The decision lives in the pure
+  `src/lib/discovery/batchPolicy.ts` (`retry` → `retry` → `pause` at `MAX_BATCH_ATTEMPTS`,
+  exponential backoff 2s/4s/8s capped at 15s), covered by `batchPolicy.test.ts` (`npm test`).
+  The failure counter is only reset by a genuine success.
+- *Inventory backpressure — no place id is ever dropped.* `inventoryCursor` only advances
+  after **every** id on a fetched page has been appended to `pendingPlaceIds` (which travels
+  in the checkpoint). `MAX_PENDING_PLACES_PER_USER` (400) is a fetch threshold, not a drop
+  cap: when the queue cannot absorb a whole 50-item page the crawler skips fetching that
+  visit, the user stays re-queued, the resolver drains `PLACES_RESOLVED_PER_VISIT` ids per
+  visit, and pagination resumes from the *unchanged* cursor once there is room. Implemented
+  in `src/lib/discovery/inventoryPolicy.ts`; `inventoryPolicy.test.ts` simulates a 1 000-place
+  inventory end-to-end and asserts every id is resolved exactly once.
 - *Resumable per-user source work.* A user is not "done" after one page. Each visit fetches
   one page of created/favourites/inventory and resolves `PLACES_RESOLVED_PER_VISIT` places,
   then returns cursors in `nodeResults[].work`. Users with `hasMoreWork` are re-queued at the
@@ -374,18 +389,37 @@ The detail inspector renders that as `StartingUser → FriendA → FriendB → F
 The client-carried `budgetState` is **UX/politeness state, not security**: a caller can omit
 it and get a fresh bucket. Real protection is a separate, server-authoritative layer in
 `src/lib/rateLimit.ts` — a fixed-window counter stored in Postgres (so it works across
-serverless instances), enabled with:
+serverless instances), keyed by client IP and route. It guards every mutating route:
+
+| Route | Default quota (per IP) |
+| --- | --- |
+| `POST /api/scan-batch` | 30 / 60 s |
+| `POST /api/scan` | 10 / 60 s |
+| `POST /api/import` | 20 / 60 s |
+| `POST /api/archive` | 10 / 3600 s |
+
+Enable it with:
 
 ```
 RATE_LIMIT_ENABLED=1
+# optional global overrides (apply to every route)
 RATE_LIMIT_WINDOW_SECONDS=60
 RATE_LIMIT_MAX_REQUESTS=30
+# optional per-route overrides (route name upper-cased, "-" -> "_"); these win over the globals
+RATE_LIMIT_MAX_REQUESTS_ARCHIVE=5
+RATE_LIMIT_WINDOW_SECONDS_ARCHIVE=3600
 ```
 
 It requires the `rate_limit_hits` table (`npx drizzle-kit push`) and fails **open** if the
 store is unavailable. It is **disabled by default** for Arena/local single-tenant previews.
 For public hosting, enable it or front the app with your platform's own limiter
 (Vercel Firewall, Cloudflare, an API gateway).
+
+**Archive growth cap.** Independently of rate limiting, `POST /api/archive` keeps at most
+`ARCHIVE_MAX_SESSIONS` sessions (default **200**, each ≤ 500 games) and prunes the *oldest*
+ones on insert (`archived_games` cascades). The UI only ever lists the 15 most recent
+sessions, so this is invisible in normal use but means anonymous writes can never grow the
+database without bound. Set `ARCHIVE_MAX_SESSIONS=0` to disable the cap.
 
 **Extending scan depth:** raise `MAX_DEPTH` (the depth selector in the sidebar is generated
 from it) and usually `MAX_USERS` / `MAX_FRIENDS_PER_USER` / `SCAN_BUDGET_MS` with it. The
@@ -413,8 +447,9 @@ If nothing but depth is known the score is `null` and the UI shows `--`. Labels
 
 ## 6. Feature notes
 
-* **Tabs** — *Discovered Games* (everything matching filters) and *Highlighted Games*
-  (rows marked with ◆). Highlights persist in `sessionStorage` for the session.
+* **Tabs** — *Discovered Games* (everything matching filters) and *Saved Games*
+  (rows you marked with ◆). Saved marks persist in `sessionStorage` for the browser session.
+  (This is *not* the original OGF "Highlighted Games" curated dataset — see §3a.)
 * **Filtering** — playability (`Any / Playable / Closed / Unrated`, see §4a), content search
   (name/description/creator/path), user scope (all / starting user / direct friends /
   depth 2+), genre (only populated with genres that actually came back), visits / players /

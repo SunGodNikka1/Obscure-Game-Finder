@@ -68,7 +68,10 @@ export const CONTINUOUS_CONFIG = {
   PLACES_RESOLVED_PER_VISIT: 15,
   /**
    * Safety ceiling on queued-but-unresolved inventory places per user, so a
-   * pathological account cannot grow the checkpoint without bound.
+   * pathological account cannot grow the checkpoint without bound. This is a
+   * BACKPRESSURE threshold, not a drop cap: when the queue cannot absorb a
+   * whole page the next page is simply not fetched until the resolver has
+   * drained room (see discovery/inventoryPolicy.ts). No returned id is lost.
    */
   MAX_PENDING_PLACES_PER_USER: 400,
 
