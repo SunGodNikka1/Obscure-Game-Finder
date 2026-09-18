@@ -46,7 +46,10 @@ export function ProcessLog({
   const active = scanning || logs.length > 0;
 
   return (
-    <section className="flex min-h-0 flex-col">
+    // lg:shrink-0 -- the sidebar is a flex column; without this the squeeze on
+    // short viewports lands entirely on this section (it collapses to 0px and
+    // its content overlaps the stats below). The aside scrolls instead.
+    <section className="flex min-h-0 flex-col lg:shrink-0">
       <div className="flex items-baseline justify-between">
         <h2 className="section-title">Processes</h2>
         <div className="flex items-center gap-2">
