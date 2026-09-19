@@ -12,6 +12,7 @@ export type PlayabilityFilter = "any" | "open" | "blocked" | "unrated" | "unknow
 export type QuickFilter = "none" | "zero" | "under10" | "under100" | "dormant" | "unknownStats";
 export type SortMode =
   | "default"
+  | "recentDiscovery"
   | "oldest"
   | "newest"
   | "obscurity"
@@ -23,6 +24,7 @@ export type SortMode =
 
 export const SORT_OPTIONS: Array<{ value: SortMode; label: string }> = [
   { value: "default", label: "Discovery order" },
+  { value: "recentDiscovery", label: "Newest discovered first" },
   { value: "oldest", label: "Oldest → Newest" },
   { value: "newest", label: "Newest → Oldest" },
   { value: "obscurity", label: "Most obscure first" },
@@ -193,6 +195,14 @@ export function applyFilters(
 
   if (filters.sort === "default") {
     return filtered;
+  }
+
+  // "Newest discovered first" is the discovery order reversed: the game OGF
+  // found most recently comes first. This is about when the finder saw the
+  // game, NOT the Roblox creation date ("newest" below). Reversed copy only --
+  // the underlying games array and the crawl order are untouched.
+  if (filters.sort === "recentDiscovery") {
+    return [...filtered].reverse();
   }
 
   const parseDateTs = (value: string | null): number | null => {

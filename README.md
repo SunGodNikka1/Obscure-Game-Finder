@@ -317,8 +317,13 @@ so it is **not** reimplemented and user stars are not presented as it.
 
 **Direct Sort inside Discovered Games.** A dedicated `Sort: [ Oldest → Newest ▼ ]` control sits
 directly in the Discovered Games tab header bar, perfectly synced with the filtering sort state:
-- Supports: `Discovery order`, `Oldest → Newest`, `Newest → Oldest`, `Most obscure first`,
-  `Least visits first`, `Least favorites first`, `Deepest discovery first`, `Most players first`, `Name (A → Z)`.
+- Supports: `Discovery order`, `Newest discovered first`, `Oldest → Newest`, `Newest → Oldest`,
+  `Most obscure first`, `Least visits first`, `Least favorites first`, `Deepest discovery first`,
+  `Most players first`, `Name (A → Z)`.
+- `Newest discovered first` is the discovery order reversed — the game OGF found most recently
+  is at the top and rises there automatically while a Continuous ∞ crawl is adding games. It is
+  about *when the finder saw the game*, not the Roblox creation date (`Newest → Oldest`). Purely
+  a client-side view: the underlying games array, crawl order and checkpoints are untouched.
 - **Date sorting fix**: Missing/null creation dates **always sort last** in both `Oldest → Newest`
   and `Newest → Oldest`.
 - **Stable sort**: Uses discovery order as tie-breaker for items with equal stats/dates.
