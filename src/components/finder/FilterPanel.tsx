@@ -58,12 +58,15 @@ export function FilterPanel({
   genres,
   matchCount,
   totalCount,
+  hiddenSavedCount = 0,
 }: {
   filters: FilterState;
   onChange: (patch: Partial<FilterState>) => void;
   genres: string[];
   matchCount: number;
   totalCount: number;
+  /** Saved universes present in the current pool (what "Hide saved games" removes). */
+  hiddenSavedCount?: number;
 }) {
   return (
     <section className="flex flex-col">
@@ -228,6 +231,18 @@ export function FilterPanel({
           </button>
           <button type="button" className="btn flex-1" onClick={() => onChange({ ...DEFAULT_FILTERS })}>
             reset filters
+          </button>
+        </Row>
+
+        <Row label="Saved">
+          <button
+            type="button"
+            className={`btn flex-1 ${filters.hideSaved ? "btn-on" : ""}`}
+            title="Hide experiences that are in your Saved Games from the Discovered Games list. Display only: nothing is removed from the crawl, and they stay in Saved Games."
+            onClick={() => onChange({ hideSaved: !filters.hideSaved })}
+          >
+            Hide saved games
+            {filters.hideSaved && hiddenSavedCount > 0 ? ` · ${hiddenSavedCount} hidden` : ""}
           </button>
         </Row>
       </div>

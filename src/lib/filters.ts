@@ -52,6 +52,8 @@ export interface FilterState {
   selectedOnly: boolean;
   minObscurity: number;
   playability: PlayabilityFilter;
+  /** Hide universes that are in the global Saved Games collection (display only). */
+  hideSaved: boolean;
 }
 
 export const DEFAULT_FILTERS: FilterState = {
@@ -71,7 +73,10 @@ export const DEFAULT_FILTERS: FilterState = {
   selectedOnly: false,
   minObscurity: 0,
   playability: "any",
+  hideSaved: false,
 };
+
+const NO_IDS: ReadonlySet<number> = new Set();
 
 const toNumber = (raw: string): number | null => {
   if (!raw.trim()) return null;
@@ -119,6 +124,8 @@ export function applyFilters(
   games: DiscoveredGame[],
   filters: FilterState,
   selected: ReadonlySet<number>,
+  /** Global Saved Games ids; only consulted when `filters.hideSaved` is on. */
+  savedIds: ReadonlySet<number> = NO_IDS,
 ): DiscoveredGame[] {
   const needle = filters.content.trim().toLowerCase();
   const visitsMin = toNumber(filters.visitsMin);
@@ -133,6 +140,8 @@ export function applyFilters(
 
   const filtered = games.filter((game) => {
     if (filters.selectedOnly && !selected.has(game.universeId)) return false;
+    // Display-only: the game stays in the pool, its order, stats and provenance untouched.
+    if (filters.hideSaved && savedIds.has(game.universeId)) return false;
 
     if (needle) {
       const haystack = [game.name, game.description ?? "", game.creatorName ?? "", game.discoveryPath.join(" ")]

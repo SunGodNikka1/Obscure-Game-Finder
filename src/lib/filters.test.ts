@@ -59,3 +59,51 @@ describe("sort: discovery order vs newest discovered first", () => {
     expect(ids(out)).toEqual([target.universeId]);
   });
 });
+
+describe("hide saved games (display-only filter)", () => {
+  const games = buildDemoGames();
+  const savedIds: ReadonlySet<number> = new Set([games[1].universeId, games[4].universeId]);
+
+  it("7. OFF leaves saved games in the list exactly as before", () => {
+    const out = applyFilters(games, { ...DEFAULT_FILTERS, hideSaved: false }, NONE, savedIds);
+    expect(ids(out)).toEqual(ids(games));
+  });
+
+  it("8. ON removes only the saved universes, and only from the displayed list", () => {
+    const out = applyFilters(games, { ...DEFAULT_FILTERS, hideSaved: true }, NONE, savedIds);
+    expect(ids(out)).toEqual(ids(games).filter((id) => !savedIds.has(id)));
+    expect(games).toHaveLength(6); // input untouched
+    expect(ids(games)).toContain(games[1].universeId);
+  });
+
+  it("9/10. saving hides immediately; unsaving makes it eligible again", () => {
+    const on = { ...DEFAULT_FILTERS, hideSaved: true };
+    const before = ids(applyFilters(games, on, NONE, new Set()));
+    expect(before).toContain(games[2].universeId);
+    const afterSave = ids(applyFilters(games, on, NONE, new Set([games[2].universeId])));
+    expect(afterSave).not.toContain(games[2].universeId);
+    expect(afterSave).toHaveLength(before.length - 1);
+    const afterUnsave = ids(applyFilters(games, on, NONE, new Set()));
+    expect(afterUnsave).toEqual(before);
+  });
+
+  it("11. composes with every sort and the other filters", () => {
+    for (const sort of ["default", "recentDiscovery", "oldest", "newest", "obscurity", "leastVisits", "name"] as const) {
+      const withHide = ids(applyFilters(games, { ...DEFAULT_FILTERS, sort, hideSaved: true }, NONE, savedIds));
+      const withoutHide = ids(applyFilters(games, { ...DEFAULT_FILTERS, sort, hideSaved: false }, NONE, savedIds));
+      // same relative order as the unhidden list, minus the saved ones
+      expect(withHide).toEqual(withoutHide.filter((id) => !savedIds.has(id)));
+    }
+    // content search + hide
+    const target = games[1];
+    expect(applyFilters(games, { ...DEFAULT_FILTERS, hideSaved: true, content: target.name }, NONE, savedIds)).toHaveLength(0);
+    expect(applyFilters(games, { ...DEFAULT_FILTERS, hideSaved: false, content: target.name }, NONE, savedIds)).toHaveLength(1);
+    // selected-only + hide: the intersection rule still applies
+    const sel = new Set([games[1].universeId, games[0].universeId]);
+    expect(ids(applyFilters(games, { ...DEFAULT_FILTERS, hideSaved: true, selectedOnly: true }, sel, savedIds))).toEqual([games[0].universeId]);
+  });
+
+  it("without a savedIds argument the flag is a no-op (nothing to hide)", () => {
+    expect(ids(applyFilters(games, { ...DEFAULT_FILTERS, hideSaved: true }, NONE))).toEqual(ids(games));
+  });
+});

@@ -7,6 +7,7 @@ import { GameResults } from "./GameResults";
 import { ArchiveModal, ExportModal, ImportModal, type ArchiveSession } from "./Modals";
 import { ProcessLog } from "./ProcessLog";
 import { useScanner } from "./useScanner";
+import { useSavedGames } from "./useSavedGames";
 import { DISCOVERY_LIMITS } from "@/lib/discovery/config";
 import type { DiscoveredGame, LogLevel } from "@/lib/discovery/types";
 import { DEFAULT_FILTERS, SORT_OPTIONS, applyFilters, collectGenres, gameUrl, type FilterState } from "@/lib/filters";
@@ -55,7 +56,6 @@ export function ObscureGameFinder() {
   } | null>(null);
 
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
-  const [saved, setSaved] = useState<Set<number>>(() => new Set());
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [focusId, setFocusId] = useState<number | null>(null);
 
@@ -79,30 +79,11 @@ export function ObscureGameFinder() {
     };
   }, []);
 
-  // Saved (starred) rows survive a reload for the lifetime of the browser session.
-  // Hydrating from sessionStorage must happen after mount (it does not exist on
-  // the server), so the setState-in-effect rule is a false positive here.
-  useEffect(() => {
-    try {
-      const raw = window.sessionStorage.getItem("ogf.savedGames") ?? window.sessionStorage.getItem("ogf.highlighted");
-      if (!raw) return;
-      const parsed: unknown = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- SSR-safe hydration from sessionStorage
-        setSaved(new Set(parsed.filter((value): value is number => typeof value === "number")));
-      }
-    } catch {
-      /* session storage unavailable */
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.sessionStorage.setItem("ogf.savedGames", JSON.stringify(Array.from(saved)));
-    } catch {
-      /* ignore quota / privacy mode */
-    }
-  }, [saved]);
+  // Saved (◆) games are a GLOBAL browser-level collection (IndexedDB), independent
+  // of the crawl: they survive new/merge/finite/∞ crawls, restore, discard, reload
+  // and pool replacement. See useSavedGames.ts.
+  const savedStore = useSavedGames(scanner.games, scanner.restorable?.games);
+  const saved = savedStore.savedIds;
 
   const flash = useCallback((level: LogLevel, message: string) => {
     setNotice({ level, message });
@@ -126,14 +107,23 @@ export function ObscureGameFinder() {
   );
   const playableCount = playCounts.open;
 
-  const tabGames = useMemo(
-    () => (tab === "saved" ? scanner.games.filter((game) => saved.has(game.universeId)) : scanner.games),
-    [tab, scanner.games, saved],
-  );
+  const tabGames = useMemo(() => {
+    if (tab !== "saved") return scanner.games;
+    // Every saved game, whether or not the current pool contains it; when it
+    // does, show the pool's copy (freshest stats / provenance for this crawl).
+    const inPool = new Map(scanner.games.map((game) => [game.universeId, game]));
+    return savedStore.savedGames.map((game) => inPool.get(game.universeId) ?? game);
+  }, [tab, scanner.games, savedStore.savedGames]);
 
   const visible = useMemo(
-    () => applyFilters(tabGames, filters, selected),
-    [tabGames, filters, selected],
+    () => applyFilters(tabGames, tab === "saved" ? { ...filters, hideSaved: false } : filters, selected, saved),
+    [tabGames, tab, filters, selected, saved],
+  );
+
+  /** Saved universes present in the current pool: what "Hide saved games" removes from view. */
+  const hiddenSavedCount = useMemo(
+    () => scanner.games.reduce((count, game) => count + (saved.has(game.universeId) ? 1 : 0), 0),
+    [scanner.games, saved],
   );
 
   const patchFilters = useCallback((patch: Partial<FilterState>) => {
@@ -190,14 +180,7 @@ export function ObscureGameFinder() {
     });
   }, []);
 
-  const toggleSave = useCallback((universeId: number) => {
-    setSaved((prev) => {
-      const next = new Set(prev);
-      if (next.has(universeId)) next.delete(universeId);
-      else next.add(universeId);
-      return next;
-    });
-  }, []);
+  const toggleSave = savedStore.toggleSave;
 
   const focusGame = useCallback((game: DiscoveredGame) => {
     setExpandedId(game.universeId);
@@ -222,7 +205,6 @@ export function ObscureGameFinder() {
       return;
     }
     const pick = visible[Math.floor(Math.random() * visible.length)];
-    setSaved((prev) => new Set(prev).add(pick.universeId));
     focusGame(pick);
     report("ok", `Random pick → ${pick.name} (universe ${pick.universeId}).`);
   }, [focusGame, report, visible]);
@@ -425,7 +407,6 @@ export function ObscureGameFinder() {
   const clearSession = useCallback(() => {
     scanner.clearSession();
     setSelected(new Set());
-    setSaved(new Set());
     setExpandedId(null);
     setFocusId(null);
     report("system", "Session cleared.");
@@ -738,6 +719,7 @@ export function ObscureGameFinder() {
         genres={genres}
         matchCount={visible.length}
         totalCount={scanner.games.length}
+        hiddenSavedCount={hiddenSavedCount}
       />
     </aside>
   );

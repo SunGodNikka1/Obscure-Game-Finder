@@ -337,6 +337,24 @@ tab is named **Saved Games**. The original OGF "Highlighted Games" was a curated
 formerly-obscure experiences shipped with the game; that dataset is not publicly obtainable,
 so it is **not** reimplemented and user stars are not presented as it.
 
+**Saved Games are global, not per crawl.** The collection lives in its own IndexedDB
+database (`ogf-saved-games`, `src/lib/persistence/savedGamesStore.ts`), deliberately
+separate from the crawl checkpoint (`ogf-crawl`), keyed by `universeId` and holding a full
+`DiscoveredGame` snapshot. A save therefore survives New / Merge / finite / ∞ crawls, Restore,
+Discard, Clear session, reload and pool replacement, and the Saved tab renders from the stored
+snapshots even when nothing is discovered. Saving twice is a no-op; unsaving removes only the
+save, never the discovery. When a saved universe is seen again (a crawl, an import, or the
+games of a recoverable checkpoint) its stored metadata is refreshed in place — `savedAt` and
+the original discovery provenance are kept. The pre-global `sessionStorage` id lists are
+imported once on first load (deduplicated, as placeholder rows until rediscovered) and the
+legacy keys are removed only after that import has been committed. Pure rules live in
+`src/lib/savedGames.ts` (`savedGames.test.ts`, `persistence/savedGamesStore.test.ts`).
+
+**Hide saved games.** A toggle in *Filtering → Saved* removes every saved universe from the
+*Discovered Games* list (display only: the pool, discovery order, stats, checkpoints and
+provenance are untouched; the Saved tab always shows them). Saving a row while it is on hides
+it immediately; unsaving makes it eligible again. It composes with every other filter and sort.
+
 **Direct Sort inside Discovered Games.** A dedicated `Sort: [ Oldest → Newest ▼ ]` control sits
 directly in the Discovered Games tab header bar, perfectly synced with the filtering sort state:
 - Supports: `Discovery order`, `Newest discovered first`, `Oldest → Newest`, `Newest → Oldest`,
@@ -478,8 +496,10 @@ If nothing but depth is known the score is `null` and the UI shows `--`. Labels
 ## 6. Feature notes
 
 * **Tabs** — *Discovered Games* (everything matching filters) and *Saved Games*
-  (rows you marked with ◆). Saved marks persist in `sessionStorage` for the browser session.
-  (This is *not* the original OGF "Highlighted Games" curated dataset — see §3a.)
+  (rows you marked with ◆). Saved games are a global, browser-level collection in IndexedDB
+  that outlives any crawl (see §3a); **Hide saved games** under *Filtering → Saved* keeps them
+  out of the Discovered list. (This is *not* the original OGF "Highlighted Games" curated
+  dataset — see §3a.)
 * **Filtering** — playability (`Any / Playable / Closed / Unrated`, see §4a), content search
   (name/description/creator/path), user scope (all / starting user / direct friends /
   depth 2+), genre (only populated with genres that actually came back), visits / players /

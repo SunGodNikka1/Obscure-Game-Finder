@@ -180,7 +180,7 @@ export interface GameResultsProps {
   tab: "discovered" | "saved";
   emptyHint?: string | null;
   onToggleSelect: (universeId: number) => void;
-  onToggleSave: (universeId: number) => void;
+  onToggleSave: (game: DiscoveredGame) => void;
   onExpand: (universeId: number | null) => void;
   onCopyLinks: () => void;
 }
@@ -191,7 +191,7 @@ export function GameResults(props: GameResultsProps) {
   if (games.length === 0) {
     const message =
       props.tab === "saved"
-        ? "No saved experiences. Mark rows with ◆ to keep them here for this session."
+        ? "No saved experiences. Mark rows with ◆ to keep them here — saved games persist in this browser across crawls."
         : props.totalDiscovered === 0
           ? props.scanning
             ? "Scanning… discovered experiences will stream in here."
@@ -357,7 +357,7 @@ export function GameResults(props: GameResultsProps) {
                     className={`btn !px-1 !py-0 !text-[0.7rem] ${isSaved ? "btn-on" : ""}`}
                     onClick={(event) => {
                       event.stopPropagation();
-                      props.onToggleSave(game.universeId);
+                      props.onToggleSave(game);
                     }}
                   >
                     ◆
