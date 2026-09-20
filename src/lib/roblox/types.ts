@@ -84,6 +84,16 @@ export interface RobloxInventoryPlace {
   updated: string | null;
 }
 
+/** develop.roblox.com/v1/universes/multiget?ids=… (max 100 ids, anonymous OK) */
+export interface RobloxUniverseInfo {
+  id: number;
+  rootPlaceId: number | null;
+  /** "Public" | "FriendsOnly" | "Private" | "Draft" (others tolerated). */
+  privacyType: string;
+  isActive: boolean;
+  isArchived: boolean;
+}
+
 /** games.roblox.com/v1/games/multiget-playability-status (returns a bare array) */
 export interface RobloxPlayabilityEntry {
   universeId: number;

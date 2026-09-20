@@ -50,6 +50,15 @@ export interface DiscoveredGame {
    * client and server can never disagree about what a status means.
    */
   playabilityStatus: string | null;
+  /**
+   * Raw `privacyType` from develop.roblox.com ("Public" | "FriendsOnly" |
+   * "Private" | "Draft"), or null when unavailable. Optional because records
+   * saved before this field existed have no value. The anonymous playability
+   * status cannot see access settings (a friends-only experience answers
+   * `GuestProhibited` just like an open one), so `classifyPlayability` needs
+   * both. Stored raw, never pre-digested.
+   */
+  privacyType?: string | null;
 
   /** Why / how this experience entered the result set. */
   discoveredByUserId: number | null;

@@ -1,5 +1,6 @@
 import { getGameDetails, getGameThumbnails, getGameVotes } from "@/lib/roblox/games";
 import { getPlayabilityStatuses } from "@/lib/roblox/playability";
+import { getUniversePrivacy } from "@/lib/roblox/universes";
 import type { RobloxClient } from "@/lib/roblox/client";
 import type { RobloxGameDetail, RobloxGameVotes, RobloxUserGameEntry } from "@/lib/roblox/types";
 import { computeObscurity } from "@/lib/obscurity";
@@ -68,6 +69,7 @@ export function buildPlaceOnlyGame(
     updated: null,
     thumbnailUrl: null,
     playabilityStatus: null,
+    privacyType: null,
     discoveredByUserId: meta.discoveredByUserId,
     discoveredByUserName: meta.discoveredByUserName,
     discoveryDepth: meta.discoveryDepth,
@@ -116,6 +118,9 @@ export async function hydrateUniverses(
   const thumbs = options.withThumbnails === false ? new Map<number, string>() : await getGameThumbnails(client, ids);
   const playability =
     options.withPlayability === false ? new Map<number, string>() : await getPlayabilityStatuses(client, ids);
+  // Access settings travel with playability: without them a friends-only or
+  // private experience is indistinguishable from an open one (see roblox/universes.ts).
+  const privacy = options.withPlayability === false ? new Map() : await getUniversePrivacy(client, ids);
 
   const games: DiscoveredGame[] = [];
   for (const universeId of ids) {
@@ -152,6 +157,7 @@ export async function hydrateUniverses(
       updated,
       thumbnailUrl: thumbs.get(universeId) ?? null,
       playabilityStatus: playability.get(universeId) ?? null,
+      privacyType: privacy.get(universeId)?.privacyType ?? null,
       discoveredByUserId: meta.discoveredByUserId,
       discoveredByUserName: meta.discoveredByUserName,
       discoveryDepth: meta.discoveryDepth,

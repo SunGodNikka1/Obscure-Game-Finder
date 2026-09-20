@@ -18,6 +18,19 @@
  *
  * `isPlayable` from the API is always false for anonymous callers and is
  * therefore ignored entirely.
+ *
+ * ACCESS SETTINGS (second signal)
+ *
+ * The guest check runs before any permission check, so anonymously a
+ * friends-only or private experience ALSO answers `GuestProhibited` -- it is
+ * indistinguishable from an open one. (Verified: across 423 real universes the
+ * anonymous endpoint only ever returned `GuestProhibited` or
+ * `ContextualPlayabilityUnrated`; `InsufficientPermissionFriendsOnly` never
+ * surfaces.) The experience's `privacyType` from develop.roblox.com
+ * (`Public` / `FriendsOnly` / `Private` / `Draft`, see roblox/universes.ts) is
+ * therefore consulted FIRST: anything other than `Public` is closed, whatever
+ * the playability status says. A missing privacyType (older saved records,
+ * or the develop API being unavailable) falls back to the status alone.
  */
 
 export type PlayabilityState =
@@ -25,6 +38,7 @@ export type PlayabilityState =
   | "unrated"
   | "ageGated"
   | "private"
+  | "friendsOnly"
   | "unapproved"
   | "paid"
   | "closed"
@@ -149,6 +163,32 @@ const MAP: Record<string, { state: PlayabilityState; badge: string; label: strin
   },
 };
 
+/**
+ * Access-setting verdicts, keyed by lower-cased develop-API `privacyType`.
+ * `Public` deliberately has no entry: it defers to the playability status.
+ */
+const PRIVACY_MAP: Record<string, { state: PlayabilityState; badge: string; label: string; explanation: string }> = {
+  friendsonly: {
+    state: "friendsOnly",
+    badge: "FRIENDS",
+    label: "Closed — friends of the creator only",
+    explanation:
+      "Only the creator's friends can play this experience. Roblox's anonymous playability check cannot see this, which is why the raw status may still say GuestProhibited.",
+  },
+  private: {
+    state: "private",
+    badge: "PRIVATE",
+    label: "Closed — private",
+    explanation: "The creator has made this experience private, so nobody else can join.",
+  },
+  draft: {
+    state: "private",
+    badge: "DRAFT",
+    label: "Closed — unpublished draft",
+    explanation: "This experience has never been published, so it cannot be launched.",
+  },
+};
+
 const UNKNOWN: PlayabilityInfo = {
   state: "unknown",
   badge: "?",
@@ -157,7 +197,24 @@ const UNKNOWN: PlayabilityInfo = {
   open: false,
 };
 
-export function classifyPlayability(status: string | null | undefined): PlayabilityInfo {
+export function classifyPlayability(
+  status: string | null | undefined,
+  privacyType?: string | null,
+): PlayabilityInfo {
+  // Access settings win: a non-Public experience is closed no matter what the
+  // (anonymous, guest-first) playability status reports.
+  if (privacyType && privacyType.toLowerCase() !== "public") {
+    const access = PRIVACY_MAP[privacyType.toLowerCase()];
+    if (access) return { ...access, open: false };
+    return {
+      state: "closed",
+      badge: "CLOSED",
+      label: `Closed — access restricted (${privacyType})`,
+      explanation: "Roblox reports an access setting other than Public for this experience.",
+      open: false,
+    };
+  }
+
   if (!status) return UNKNOWN;
   const entry = MAP[status.toLowerCase()];
   if (!entry) {
@@ -176,12 +233,18 @@ export function classifyPlayability(status: string | null | undefined): Playabil
   return { ...entry, open: entry.state === "open" };
 }
 
-export function isPlayable(status: string | null | undefined): boolean {
-  return classifyPlayability(status).open;
+export function isPlayable(status: string | null | undefined, privacyType?: string | null): boolean {
+  return classifyPlayability(status, privacyType).open;
+}
+
+/** The two raw signals a game record carries; both are consulted. */
+export interface PlayabilitySignals {
+  playabilityStatus: string | null;
+  privacyType?: string | null;
 }
 
 /** Counts used by the Processes log and the status bar. */
-export function summarisePlayability(statuses: Array<string | null>): {
+export function summarisePlayability(games: ReadonlyArray<PlayabilitySignals>): {
   open: number;
   closed: number;
   unknown: number;
@@ -191,8 +254,8 @@ export function summarisePlayability(statuses: Array<string | null>): {
   let closed = 0;
   let unknown = 0;
   let unrated = 0;
-  for (const status of statuses) {
-    const info = classifyPlayability(status);
+  for (const game of games) {
+    const info = classifyPlayability(game.playabilityStatus, game.privacyType);
     if (info.state === "unknown") unknown += 1;
     else if (info.open) open += 1;
     else {

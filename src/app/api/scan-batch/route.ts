@@ -409,7 +409,7 @@ export async function POST(request: Request): Promise<Response> {
               stats.games += games.length;
               send({ type: "games", ts: Date.now(), games });
 
-              const play = summarisePlayability(games.map((game) => game.playabilityStatus));
+              const play = summarisePlayability(games);
               stats.playable += play.open;
               stats.closed += play.closed;
               if (games.length > 0) {

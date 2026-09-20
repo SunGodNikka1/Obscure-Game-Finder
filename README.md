@@ -183,10 +183,32 @@ on `DiscoveredGame.playabilityStatus`. Interpretation lives in one place,
 Any unrecognised `ContextualPlayability*` status is treated as gated rather than silently
 passed as playable, so future Roblox statuses fail safe.
 
+**Access settings — the second signal.** The playability endpoint is *guest-first*: for an
+anonymous caller a private or friends-only experience answers `GuestProhibited` exactly like
+an open one (verified across 423 real universes: only `GuestProhibited` and
+`ContextualPlayabilityUnrated` ever come back; `InsufficientPermissionFriendsOnly` never
+surfaces anonymously). So every universe is also checked against
+`develop.roblox.com/v1/universes/multiget` (anonymous, 100 ids per call) and the raw
+`privacyType` is stored on `DiscoveredGame.privacyType`. `classifyPlayability` consults it
+*first*; anything other than `Public` is closed regardless of the status:
+
+| `privacyType` | State | Badge | Meaning |
+| --- | --- | --- | --- |
+| `Public` | *(defer to status)* | — | access is open; the status table above decides |
+| `FriendsOnly` | friendsOnly | `FRIENDS` | only the creator's friends can play |
+| `Private` | private | `PRIVATE` | the creator made it private (`isActive: false`) |
+| `Draft` | private | `DRAFT` | never published |
+| *(anything else non-Public)* | closed | `CLOSED` | fails safe |
+| *(missing — older saved records)* | — | — | falls back to the status alone |
+
+In a sample of hypasnail's favourites, 8 of 102 experiences were `Private` yet had been
+shown as "Playable (sign-in required)"; they now read `PRIVATE`. The detail inspector shows
+both raw values (`raw status · GuestProhibited · access · Private`).
+
 **The honest caveat:** the check runs anonymously from the server, so `GuestProhibited`
-is read as “open”. That is accurate for the closure wave this feature targets, but it
-cannot predict per-account restrictions (an under-13 account still won't be able to open a
-17+ experience). The UI states this next to the filter.
+is read as “open” for `Public` experiences. That is accurate for the closure wave this
+feature targets, but it cannot predict per-account restrictions (an under-13 account still
+won't be able to open a 17+ experience). The UI states this next to the filter.
 
 Where it shows up:
 

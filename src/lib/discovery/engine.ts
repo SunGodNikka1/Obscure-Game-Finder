@@ -355,7 +355,7 @@ export async function* runDiscovery(
           push({ type: "games", ts: Date.now(), games });
           log("ok", `${games.length} new experience${games.length === 1 ? "" : "s"} recorded from ${node.username}.`);
 
-          const play = summarisePlayability(games.map((game) => game.playabilityStatus));
+          const play = summarisePlayability(games);
           stats.playable += play.open;
           stats.closed += play.closed;
           if (games.length > 0) {

@@ -13,6 +13,7 @@ const PLAYABILITY_BADGE_CLASS: Record<PlayabilityState, string> = {
   unrated: "badge-danger",
   ageGated: "badge-warn",
   private: "badge-warn",
+  friendsOnly: "badge-warn",
   unapproved: "badge-danger",
   paid: "badge-warn",
   closed: "badge-danger",
@@ -40,7 +41,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function GameDetail({ game }: { game: DiscoveredGame }) {
   const url = gameUrl(game);
-  const play = classifyPlayability(game.playabilityStatus);
+  const play = classifyPlayability(game.playabilityStatus, game.privacyType);
   return (
     <div className="panel-alt m-1.5 flex flex-col gap-3 p-3 md:flex-row">
       <div className="flex w-full flex-none flex-col gap-2 md:w-[260px]">
@@ -82,9 +83,9 @@ function GameDetail({ game }: { game: DiscoveredGame }) {
           <p className="mono mt-1 text-[0.62rem] leading-relaxed text-[var(--text-dim)]">
             {play.explanation}
           </p>
-          {game.playabilityStatus ? (
+          {game.playabilityStatus || game.privacyType ? (
             <p className="mono mt-1 text-[0.6rem] text-[var(--text-dim)] opacity-60">
-              raw status · {game.playabilityStatus}
+              raw status · {game.playabilityStatus ?? "--"} · access · {game.privacyType ?? "--"}
             </p>
           ) : null}
         </div>
@@ -214,7 +215,7 @@ export function GameResults(props: GameResultsProps) {
         </div>
         <div className="scroll-thin min-h-0 flex-1 overflow-auto p-2">
           {games.map((game) => {
-            const play = classifyPlayability(game.playabilityStatus);
+            const play = classifyPlayability(game.playabilityStatus, game.privacyType);
             return (
               <div key={game.universeId} className="mono flex gap-2 py-[2px] text-[0.72rem]">
                 <a
@@ -259,7 +260,7 @@ export function GameResults(props: GameResultsProps) {
           const isSelected = props.selected.has(game.universeId);
           const isSaved = props.saved.has(game.universeId);
           const isExpanded = props.expandedId === game.universeId;
-          const play = classifyPlayability(game.playabilityStatus);
+          const play = classifyPlayability(game.playabilityStatus, game.privacyType);
           return (
             <div key={game.universeId} id={`game-${game.universeId}`}>
               <div

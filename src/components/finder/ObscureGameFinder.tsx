@@ -121,7 +121,7 @@ export function ObscureGameFinder() {
   const genres = useMemo(() => collectGenres(scanner.games), [scanner.games]);
 
   const playCounts = useMemo(
-    () => summarisePlayability(scanner.games.map((game) => game.playabilityStatus)),
+    () => summarisePlayability(scanner.games),
     [scanner.games],
   );
   const playableCount = playCounts.open;

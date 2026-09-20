@@ -183,7 +183,7 @@ export function applyFilters(
     if (filters.minObscurity > 0 && (game.obscurity ?? -1) < filters.minObscurity) return false;
 
     if (filters.playability !== "any") {
-      const info = classifyPlayability(game.playabilityStatus);
+      const info = classifyPlayability(game.playabilityStatus, game.privacyType);
       if (filters.playability === "open" && !info.open) return false;
       if (filters.playability === "blocked" && (info.open || info.state === "unknown")) return false;
       if (filters.playability === "unrated" && info.state !== "unrated") return false;

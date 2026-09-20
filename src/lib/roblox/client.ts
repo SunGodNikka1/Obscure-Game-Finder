@@ -21,6 +21,7 @@ export const ROBLOX_HOSTS = {
   thumbnails: "https://thumbnails.roblox.com",
   apis: "https://apis.roblox.com",
   inventory: "https://inventory.roblox.com",
+  develop: "https://develop.roblox.com",
 } as const;
 
 export type RobloxHostKey = keyof typeof ROBLOX_HOSTS;
@@ -54,7 +55,8 @@ export interface RobloxRequestOptions {
   host: RobloxHostKey;
   /** Must start with `/`. Path segments are encoded by the caller helpers. */
   path: string;
-  query?: Record<string, string | number | boolean | undefined>;
+  /** Array values are sent as repeated keys (`ids=1&ids=2`), as some Roblox endpoints require. */
+  query?: Record<string, string | number | boolean | undefined | ReadonlyArray<string | number>>;
   method?: "GET" | "POST";
   body?: unknown;
   timeoutMs?: number;
@@ -118,6 +120,10 @@ function buildUrl(options: RobloxRequestOptions): string {
   if (options.query) {
     for (const [key, value] of Object.entries(options.query)) {
       if (value === undefined || value === null || value === "") continue;
+      if (Array.isArray(value)) {
+        for (const item of value) url.searchParams.append(key, String(item));
+        continue;
+      }
       url.searchParams.set(key, String(value));
     }
   }
