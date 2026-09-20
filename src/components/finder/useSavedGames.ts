@@ -64,7 +64,6 @@ export function useSavedGames(pool: ReadonlyArray<DiscoveredGame>, checkpointGam
         }
       }
       if (cancelled) return;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- async hydration from IndexedDB
       setRecords(next);
       setReady(true);
     })();

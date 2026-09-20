@@ -8,6 +8,7 @@ import { ArchiveModal, ExportModal, ImportModal, type ArchiveSession } from "./M
 import { ProcessLog } from "./ProcessLog";
 import { useScanner } from "./useScanner";
 import { useSavedGames } from "./useSavedGames";
+import { createHideSavedPreference } from "@/lib/hideSavedPreference";
 import { DISCOVERY_LIMITS } from "@/lib/discovery/config";
 import type { DiscoveredGame, LogLevel } from "@/lib/discovery/types";
 import { DEFAULT_FILTERS, SORT_OPTIONS, applyFilters, collectGenres, gameUrl, type FilterState } from "@/lib/filters";
@@ -46,6 +47,23 @@ export function ObscureGameFinder() {
 
   const [tab, setTab] = useState<Tab>("discovered");
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
+
+  // "Hide saved games" is the one filter flag that persists (localStorage,
+  // `ogf.hideSaved`). Hydrated after mount so the server render and the first
+  // client render agree; the controller ignores persist() until hydrated, so
+  // the default `false` can never overwrite a stored `true`.
+  const hideSavedPref = useRef(createHideSavedPreference(() => window.localStorage));
+  const [hideSavedReady, setHideSavedReady] = useState(false);
+  useEffect(() => {
+    const restored = hideSavedPref.current.hydrate();
+    if (restored) setFilters((prev) => ({ ...prev, hideSaved: true }));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only hydration of a stored preference
+    setHideSavedReady(true);
+  }, []);
+  useEffect(() => {
+    if (!hideSavedReady) return;
+    hideSavedPref.current.persist(filters.hideSaved);
+  }, [hideSavedReady, filters.hideSaved]);
   const [linksOnly, setLinksOnly] = useState(false);
   const [ogfChunked, setOgfChunked] = useState(false);
   const [exportState, setExportState] = useState<{

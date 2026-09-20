@@ -354,6 +354,9 @@ legacy keys are removed only after that import has been committed. Pure rules li
 *Discovered Games* list (display only: the pool, discovery order, stats, checkpoints and
 provenance are untouched; the Saved tab always shows them). Saving a row while it is on hides
 it immediately; unsaving makes it eligible again. It composes with every other filter and sort.
+The toggle is the one filter flag that is remembered across refreshes (localStorage key
+`ogf.hideSaved`; `src/lib/hideSavedPreference.ts`). Note that *All Games* and *reset filters*
+still reset it along with the other filters, as before.
 
 **Direct Sort inside Discovered Games.** A dedicated `Sort: [ Oldest → Newest ▼ ]` control sits
 directly in the Discovered Games tab header bar, perfectly synced with the filtering sort state:
