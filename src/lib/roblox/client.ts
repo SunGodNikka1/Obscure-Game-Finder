@@ -6,13 +6,15 @@
  *    plus a path, never a full URL)
  *  - per-request timeouts
  *  - retries with backoff for transient failures (network / 5xx)
- *  - rate-limit (HTTP 429) awareness with `retry-after` support
+ *  - rate-limit (HTTP 429) awareness: a SHARED adaptive cooldown (throttle.ts)
+ *    that pauses every request of this client, honouring `retry-after`
  *  - request counting (surfaced in the UI as the `HTTP:` metric)
  *  - in-scan response de-duplication / memoisation
  *  - lightweight response validation
  */
 
 import { RequestBudget, type BudgetKind } from "./budget";
+import { RobloxThrottle, type ThrottleEvent } from "./throttle";
 
 export const ROBLOX_HOSTS = {
   users: "https://users.roblox.com",
@@ -51,6 +53,30 @@ export class RobloxApiError extends Error {
   }
 }
 
+/**
+ * Thrown WITHOUT contacting Roblox when the shared cooldown would outlast the
+ * caller's deadline (a Continuous batch's wall-clock budget). Carries status
+ * 429 because it means exactly "rate limited, try again later".
+ */
+export class RobloxThrottleDeferredError extends RobloxApiError {
+  readonly waitMs: number;
+
+  constructor(label: string, waitMs: number) {
+    super("Deferred: Roblox cooldown outlasts this batch", 429, label);
+    this.name = "RobloxThrottleDeferredError";
+    this.waitMs = waitMs;
+  }
+}
+
+/**
+ * True for Roblox throttling (a real HTTP 429 or a deferral because of the
+ * shared cooldown). This is TRANSIENT: callers must keep the work for later,
+ * never treat it like a terminal 403/404.
+ */
+export function isRateLimited(error: unknown): boolean {
+  return error instanceof RobloxApiError && error.status === 429;
+}
+
 export interface RobloxRequestOptions {
   host: RobloxHostKey;
   /** Must start with `/`. Path segments are encoded by the caller helpers. */
@@ -80,7 +106,12 @@ export interface RobloxClientEvents {
     reason: "rate-limit" | "transient";
   }) => void;
   onFailure?: (info: { label: string; status: number | null; message: string }) => void;
+  /** Shared-cooldown changes (new/escalated throttle, first wait of an episode, restored pacing). */
+  onThrottle?: (event: ThrottleEvent) => void;
 }
+
+/** A cooldown ending closer than this to the deadline is not worth waiting for. */
+const DEADLINE_MARGIN_MS = 1_500;
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -137,8 +168,12 @@ export class RobloxClient {
 
   /** Crawler-managed safety budgets (see budget.ts). */
   readonly budget: RequestBudget;
+  /** Shared adaptive cooldown fed by Roblox 429s (see throttle.ts). */
+  readonly throttle: RobloxThrottle;
 
   private readonly signal?: AbortSignal;
+  /** Epoch ms after which a cooldown is deferred instead of waited out. */
+  private readonly deadline?: number;
   private readonly events: RobloxClientEvents;
   private readonly defaultTimeout: number;
   private readonly cache = new Map<string, unknown>();
@@ -150,12 +185,33 @@ export class RobloxClient {
       events?: RobloxClientEvents;
       timeoutMs?: number;
       budget?: RequestBudget;
+      throttle?: RobloxThrottle;
+      /** Wall-clock deadline (epoch ms). Without one, cooldowns are always waited out. */
+      deadline?: number;
     } = {},
   ) {
     this.signal = opts.signal;
     this.events = opts.events ?? {};
     this.defaultTimeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.budget = opts.budget ?? new RequestBudget();
+    this.throttle = opts.throttle ?? new RobloxThrottle();
+    this.deadline = opts.deadline;
+  }
+
+  /** True when the shared cooldown would run past this client's deadline. */
+  cooldownOutlastsDeadline(now = Date.now()): boolean {
+    const wait = this.throttle.remainingMs(now);
+    return wait > 0 && this.deadline !== undefined && now + wait + DEADLINE_MARGIN_MS > this.deadline;
+  }
+
+  /** Shared cooldown gate, run before every attempt. Abortable; defers past the deadline. */
+  private async awaitCooldown(label: string): Promise<void> {
+    const waitMs = this.throttle.remainingMs();
+    if (waitMs <= 0) return;
+    if (this.cooldownOutlastsDeadline()) throw new RobloxThrottleDeferredError(label, waitMs);
+    const announce = this.throttle.announceWait(label);
+    if (announce) this.events.onThrottle?.(announce);
+    await sleep(waitMs, this.signal);
   }
 
   get aborted(): boolean {
@@ -201,6 +257,10 @@ export class RobloxClient {
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       this.throwIfAborted();
 
+      // Shared Roblox cooldown: if ANY request was throttled, everyone waits.
+      // Runs before the budget gate so a deferred request consumes no token.
+      await this.awaitCooldown(options.label);
+
       // Crawler-managed budget gate: pause (do not drop) when a bucket is dry.
       if (!options.skipBudget) {
         const kind: BudgetKind = options.budgetKind ?? "general";
@@ -235,16 +295,19 @@ export class RobloxClient {
 
         if (response.status === 429) {
           this.rateLimitHits += 1;
-          const retryAfter = Number(response.headers.get("retry-after"));
-          const waitMs = Math.min(
-            Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2500 * (attempt + 1),
-            MAX_RETRY_WAIT_MS,
-          );
+          // Feed the SHARED cooldown (Retry-After or escalation); the next
+          // attempt -- and every other request -- waits at the gate above.
+          const event = this.throttle.recordRateLimit(response.headers.get("retry-after"), options.label);
+          if (event) this.events.onThrottle?.(event);
           lastError = new RobloxApiError("Rate limited by Roblox", 429, options.label);
           if (attempt === retries) break;
-          this.events.onRetry?.({ label: options.label, attempt: attempt + 1, waitMs, reason: "rate-limit" });
-          await sleep(waitMs, this.signal);
           continue;
+        }
+
+        if (response.status < 500) {
+          // Roblox answered (2xx or a terminal 4xx): lets throttle escalation decay.
+          const restored = this.throttle.recordSuccess();
+          if (restored) this.events.onThrottle?.(restored);
         }
 
         if (response.status >= 500) {

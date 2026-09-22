@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sleep } from "@/lib/roblox/client";
 import { BUDGET_CONFIG, type SerializedBudgetState } from "@/lib/roblox/budget";
+import type { SerializedThrottleState } from "@/lib/roblox/throttle";
 import { CONTINUOUS_CONFIG } from "@/lib/discovery/config";
 import { evaluateBatchOutcome, retryDelayMs } from "@/lib/discovery/batchPolicy";
 import { clearCrawl, loadCrawl, saveCrawl, type PersistedCrawl } from "@/lib/persistence/crawlStore";
@@ -97,6 +98,12 @@ export function useScanner() {
   const seenUserIdsRef = useRef<Set<number>>(new Set());
   const completedUserIdsRef = useRef<Set<number>>(new Set());
   const budgetStateRef = useRef<SerializedBudgetState | null>(null);
+  /**
+   * Shared Roblox 429 cooldown carried between stateless batches. Deliberately
+   * NOT reset with the crawl: Roblox throttles this browser/IP, not a crawl,
+   * and an expired cooldown is a no-op.
+   */
+  const throttleStateRef = useRef<SerializedThrottleState | null>(null);
   const activeRequestRef = useRef<ScanRequest | null>(null);
   const targetRef = useRef<ScanTarget | null>(null);
   const batchNumberRef = useRef(0);
@@ -376,6 +383,7 @@ export function useScanner() {
               includeFavorites: request.includeFavorites,
               includeInventory: request.includeInventory,
               budgetState: budgetStateRef.current,
+              throttleState: throttleStateRef.current,
               knownUniverseIds: gamesRef.current.slice(-400).map((g) => g.universeId),
             }),
             signal: controller.signal,
@@ -478,6 +486,7 @@ export function useScanner() {
         if (sawCheckpoint) {
           const cp = checkpoint!;
           budgetStateRef.current = cp.budgetState;
+          if (cp.throttleState) throttleStateRef.current = cp.throttleState;
 
           const workById = new Map(cp.nodeResults.map((r) => [r.userId, r]));
           for (const uid of cp.processedUserIds) {
@@ -619,7 +628,9 @@ export function useScanner() {
             break;
           }
 
-          const delay = retryDelayMs(consecutiveFailures);
+          // Never retry into an active Roblox cooldown (it would only be deferred again).
+          const cooldownWait = Math.max(0, (throttleStateRef.current?.cooldownUntil ?? 0) - Date.now());
+          const delay = Math.max(retryDelayMs(consecutiveFailures), cooldownWait);
           log(
             "warn",
             `[RETRY] Batch failed (${reason}). Attempt ${consecutiveFailures}/${CONTINUOUS_CONFIG.MAX_BATCH_ATTEMPTS} — retrying in ${Math.round(delay / 1000)}s.`,
@@ -638,7 +649,18 @@ export function useScanner() {
         isFirstBatch = false;
 
         if (continuousRunningRef.current && frontierRef.current.length > 0) {
-          await sleep(CONTINUOUS_CONFIG.INTER_BATCH_DELAY_MS);
+          // A batch that stopped because Roblox's cooldown outlasted it: wait the
+          // cooldown out here (Stop-responsive) rather than firing empty batches.
+          const cooldownLeft = (throttleStateRef.current?.cooldownUntil ?? 0) - Date.now();
+          if (cooldownLeft > CONTINUOUS_CONFIG.INTER_BATCH_DELAY_MS) {
+            log("warn", `[THROTTLE] waiting ${Math.ceil(cooldownLeft / 1000)}s for Roblox's cooldown before the next batch…`);
+            const until = Date.now() + cooldownLeft;
+            while (continuousRunningRef.current && Date.now() < until) {
+              await sleep(Math.min(250, until - Date.now()));
+            }
+          } else {
+            await sleep(CONTINUOUS_CONFIG.INTER_BATCH_DELAY_MS);
+          }
         }
       }
 

@@ -1,5 +1,6 @@
-import { RobloxClient, ScanAbortedError, describeError, isAbort, sleep } from "@/lib/roblox/client";
+import { RobloxClient, ScanAbortedError, describeError, isAbort, isRateLimited, sleep } from "@/lib/roblox/client";
 import { RequestBudget } from "@/lib/roblox/budget";
+import { RobloxThrottle, describeThrottleEvent } from "@/lib/roblox/throttle";
 import { fetchUserFavoriteGamesPage } from "@/lib/roblox/favorites";
 import { listFriends } from "@/lib/roblox/friends";
 import { fetchUserCreatedGamesPage, resolvePlaceToUniverse } from "@/lib/roblox/games";
@@ -85,6 +86,9 @@ export async function POST(request: Request): Promise<Response> {
       const heartbeat = setInterval(() => write("\n"), 10_000);
 
       const budget = new RequestBudget({ initialState: payload.budgetState ?? null });
+      const throttle = new RobloxThrottle({ initialState: payload.throttleState ?? null });
+      const batchStartedAt = Date.now();
+      const batchDeadline = batchStartedAt + CONTINUOUS_CONFIG.BATCH_TIME_MS;
       const initialSnap = budget.snapshot();
 
       const stats: ScanStats = {
@@ -120,6 +124,10 @@ export async function POST(request: Request): Promise<Response> {
       const client = new RobloxClient({
         signal: request.signal,
         budget,
+        throttle,
+        // A shared cooldown that would outlast the batch is deferred to the next
+        // batch (carried in throttleState) instead of burning the wall clock.
+        deadline: batchDeadline,
         events: {
           onRequest: ({ count }) => {
             stats.requestsMade = count;
@@ -143,8 +151,17 @@ export async function POST(request: Request): Promise<Response> {
             );
             emitStats();
           },
-          onFailure: ({ label, message }) => {
-            log("error", `Failed: ${label} — ${message}`);
+          onFailure: ({ label, status, message }) => {
+            // A 429 is transient here: the work is kept for a later visit (see
+            // the per-source handling below), so it is not reported as a failure.
+            if (status === 429) log("warn", `Rate limited: ${label} — kept for a later visit`);
+            else log("error", `Failed: ${label} — ${message}`);
+          },
+          onThrottle: (event) => {
+            const { level, message } = describeThrottleEvent(event);
+            stats.waitingSeconds = event.type === "waiting" ? Math.ceil(event.waitMs / 1000) : 0;
+            log(level, message);
+            emitStats();
           },
         },
       });
@@ -153,7 +170,6 @@ export async function POST(request: Request): Promise<Response> {
       const nodeResults: NodeWorkResult[] = [];
       const discoveredFriends: UserFriendDiscovery[] = [];
       const visitedGames = new Set<number>(payload.knownUniverseIds ?? []);
-      const batchStartedAt = Date.now();
 
       const finish = (ok: boolean, reason?: string) => {
         const snap = budget.snapshot();
@@ -172,6 +188,7 @@ export async function POST(request: Request): Promise<Response> {
             nodeResults,
             discoveredFriends,
             budgetState: budget.toState(),
+            throttleState: throttle.toState(),
             stats: { ...stats },
           },
         });
@@ -218,6 +235,13 @@ export async function POST(request: Request): Promise<Response> {
 
           if (Date.now() - batchStartedAt > CONTINUOUS_CONFIG.BATCH_TIME_MS) {
             log("warn", "[BATCH] Wall-clock budget reached. Remaining users stay queued.");
+            break;
+          }
+          if (client.cooldownOutlastsDeadline()) {
+            log(
+              "warn",
+              `[THROTTLE] Roblox cooldown (${Math.ceil(client.throttle.remainingMs() / 1000)}s) outlasts this batch · remaining users stay queued for the next batch.`,
+            );
             break;
           }
 
@@ -275,8 +299,13 @@ export async function POST(request: Request): Promise<Response> {
               );
             } catch (error) {
               if (isAbort(error)) throw error;
-              work.createdDone = true; // hidden/unavailable: stop retrying this source
-              log("warn", `[CREATED] unavailable for ${node.username} — ${describeError(error)}`);
+              if (isRateLimited(error)) {
+                // Transient: keep the source and its cursor for a later visit.
+                log("warn", `[CREATED] rate limited for ${node.username} · kept for a later visit`);
+              } else {
+                work.createdDone = true; // hidden/unavailable: stop retrying this source
+                log("warn", `[CREATED] unavailable for ${node.username} — ${describeError(error)}`);
+              }
             }
             emitStats();
           }
@@ -302,8 +331,12 @@ export async function POST(request: Request): Promise<Response> {
               );
             } catch (error) {
               if (isAbort(error)) throw error;
-              work.favoritesDone = true;
-              log("warn", `[FAV] unavailable for ${node.username} (may be hidden) — ${describeError(error)}`);
+              if (isRateLimited(error)) {
+                log("warn", `[FAV] rate limited for ${node.username} · kept for a later visit`);
+              } else {
+                work.favoritesDone = true;
+                log("warn", `[FAV] unavailable for ${node.username} (may be hidden) — ${describeError(error)}`);
+              }
             }
             emitStats();
           }
@@ -331,8 +364,13 @@ export async function POST(request: Request): Promise<Response> {
               }
             } catch (error) {
               if (isAbort(error)) throw error;
-              work.inventoryDone = true;
-              log("warn", `[INV] unavailable for ${node.username} (may be hidden) — ${describeError(error)}`);
+              if (isRateLimited(error)) {
+                // advanceInventoryListing leaves cursor and queue untouched on error.
+                log("warn", `[INV] rate limited for ${node.username} · listing kept for a later visit`);
+              } else {
+                work.inventoryDone = true;
+                log("warn", `[INV] unavailable for ${node.username} (may be hidden) — ${describeError(error)}`);
+              }
             }
             emitStats();
           }
@@ -342,14 +380,28 @@ export async function POST(request: Request): Promise<Response> {
           if (pending.length > 0) {
             const slice = pending.splice(0, CONTINUOUS_CONFIG.PLACES_RESOLVED_PER_VISIT);
             let resolved = 0;
-            for (const placeId of slice) {
+            let attempted = 0;
+            let throttledBack = 0;
+            for (let index = 0; index < slice.length; index += 1) {
+              const placeId = slice[index];
               client.throwIfAborted();
               let universeId: number | null = null;
               try {
                 universeId = await resolvePlaceToUniverse(client, placeId);
-              } catch {
+              } catch (error) {
+                if (isAbort(error)) throw error;
+                if (isRateLimited(error)) {
+                  // 429 is transient: this place and the rest of the slice stay
+                  // queued (front of the queue, same order) for a later visit
+                  // instead of being written off as unresolved partial records.
+                  const unprocessed = slice.slice(index);
+                  pending.unshift(...unprocessed);
+                  throttledBack = unprocessed.length;
+                  break;
+                }
                 universeId = null;
               }
+              attempted += 1;
               if (universeId && !visitedGames.has(universeId)) {
                 record(universeId, "inventory", { rootPlaceId: placeId });
                 resolved += 1;
@@ -359,7 +411,8 @@ export async function POST(request: Request): Promise<Response> {
             }
             log(
               "info",
-              `[INV] resolved ${resolved}/${slice.length} place${slice.length === 1 ? "" : "s"}` +
+              `[INV] resolved ${resolved}/${attempted} place${attempted === 1 ? "" : "s"}` +
+                (throttledBack > 0 ? ` · ${throttledBack} kept queued (rate limited)` : "") +
                 (pending.length > 0 ? ` · ${pending.length} still queued for this user` : " · queue clear"),
             );
             emitStats();
@@ -447,8 +500,13 @@ export async function POST(request: Request): Promise<Response> {
               work.friendsDone = true;
             } catch (error) {
               if (isAbort(error)) throw error;
-              work.friendsDone = true;
-              log("warn", `[FRIENDS] unavailable for ${node.username} — ${describeError(error)}`);
+              if (isRateLimited(error)) {
+                // friendsDone stays false -> the user is re-queued and friends retried.
+                log("warn", `[FRIENDS] rate limited for ${node.username} · kept for a later visit`);
+              } else {
+                work.friendsDone = true;
+                log("warn", `[FRIENDS] unavailable for ${node.username} — ${describeError(error)}`);
+              }
             }
           }
 
@@ -457,7 +515,9 @@ export async function POST(request: Request): Promise<Response> {
             (payload.includeCreated && !work.createdDone) ||
             (payload.includeFavorites && !work.favoritesDone) ||
             (payload.includeInventory && !work.inventoryDone) ||
-            (work.pendingPlaceIds?.length ?? 0) > 0;
+            (work.pendingPlaceIds?.length ?? 0) > 0 ||
+            // Only a rate-limited friend fetch leaves this false after a visit.
+            !work.friendsDone;
 
           nodeResults.push({ userId: node.userId, work, hasMoreWork });
           processedUserIds.push(node.userId);

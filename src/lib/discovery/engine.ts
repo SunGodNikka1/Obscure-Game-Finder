@@ -1,4 +1,5 @@
 import { RobloxClient, ScanAbortedError, describeError, isAbort, sleep } from "@/lib/roblox/client";
+import { describeThrottleEvent } from "@/lib/roblox/throttle";
 import { listUserFavoriteGames } from "@/lib/roblox/favorites";
 import { listFriends } from "@/lib/roblox/friends";
 import { listUserCreatedGames, resolvePlaceToUniverse } from "@/lib/roblox/games";
@@ -94,6 +95,12 @@ export async function* runDiscovery(
       },
       onFailure: ({ label, message }) => {
         log("error", `Failed: ${label} — ${message}`);
+      },
+      onThrottle: (event) => {
+        const { level, message } = describeThrottleEvent(event);
+        stats.waitingSeconds = event.type === "waiting" ? Math.ceil(event.waitMs / 1000) : 0;
+        log(level, message);
+        emitStats();
       },
     },
   });

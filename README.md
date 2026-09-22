@@ -128,8 +128,33 @@ The client never talks to Roblox directly, so no secrets or hostnames leak into 
 
 Those five hostnames are the **entire allowlist** (`ROBLOX_HOSTS` in `lib/roblox/client.ts`).
 Callers pass a host *key* plus a path — a full URL can never be supplied, which removes the
-SSRF surface. Requests carry a 12 s timeout, up to 2 retries with backoff, `retry-after`
-aware 429 handling, per-scan de-duplication and a request counter (the `HTTP:` metric).
+SSRF surface. Requests carry a 12 s timeout, up to 2 retries with backoff, a shared adaptive
+429 cooldown (below), per-scan de-duplication and a request counter (the `HTTP:` metric).
+
+**Shared adaptive Roblox cooldown** (`lib/roblox/throttle.ts`). `RequestBudget` is our
+*proactive* politeness limit; the throttle is the *reactive* half. A 429 from **any** Roblox
+endpoint opens one cooldown that every request of the client waits on (abortable) before
+touching Roblox again — users, games, inventory, place resolution, friends, favourites,
+playability, thumbnails alike. No 429, no delay: normal crawling stays fast.
+
+* A valid `Retry-After` (seconds or HTTP-date) sets the cooldown, capped at 60 s.
+* Otherwise it escalates only when Roblox refuses again *after* we waited:
+  **8 s → 16 s → 32 s → 60 s (cap)**. 429s from requests already in flight don't escalate.
+* It decays one level per 10 answered requests and resets after 2 min without a 429, so an old
+  429 never slows the crawl permanently.
+* Continuous ∞ is stateless server-side, so the cooldown rides in the payload/checkpoint as
+  `throttleState` next to `budgetState`. A batch that ended mid-throttle hands it to the next
+  one; an expired cooldown is a no-op. If the cooldown would outlast a batch's wall clock the
+  request is **deferred** (no network call, no budget token), the batch returns cleanly with its
+  unfinished users queued, and the browser waits out the cooldown before the next batch.
+* 429 is transient, never terminal: in `/api/scan-batch` a throttled place stays in
+  `pendingPlaceIds` (not written off as a partial record), and a throttled created /
+  favourites / inventory / friends fetch keeps its source open with its cursor, so the user is
+  re-queued. `403`/`404` behave exactly as before.
+* Processes shows one line per cooldown change, not one per queued request:
+  `[THROTTLE] Roblox rate limit detected · global cooldown 8s`,
+  `[THROTTLE] repeated rate limit · cooldown increased to 16s`,
+  `[THROTTLE] Roblox responding normally · normal pacing restored`.
 
 ### Endpoint limitations discovered while building this
 
@@ -143,8 +168,8 @@ aware 429 handling, per-scan de-duplication and a request counter (the `HTTP:` m
 * Thumbnails can come back in state `Blocked`/`Pending`; only `Completed` images are used.
 * Favourite lists can be hidden by the user (`403`) — logged as “favourites unavailable”.
 * Both paged endpoints cap at 50 items/page; the crawler reads 2 pages per user by default.
-* Roblox rate-limits aggressively per IP; the client surfaces this as
-  `Rate limited. Waiting Ns…` in Processes and as the `Refresh: hold Ns` status.
+* Roblox rate-limits aggressively per IP (the place→universe endpoint especially); the client
+  answers with the shared cooldown above and surfaces it as `[THROTTLE] …` lines in Processes.
 * `multiget-playability-status` rejects more than 50 ids per call with
   `code 9: Too many universe IDs were requested.` — it is batched at 50.
 * That same endpoint returns `isPlayable: false` for **every** experience when called

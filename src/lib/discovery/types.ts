@@ -1,3 +1,4 @@
+import type { SerializedThrottleState } from "@/lib/roblox/throttle";
 /**
  * Types shared by the server-side discovery engine and the client UI.
  * These are transport types: they are serialised as NDJSON over /api/scan.
@@ -193,6 +194,12 @@ export interface BatchCheckpoint {
     friendRemaining: number;
     windowStartedAt: number;
   };
+  /**
+   * Shared Roblox 429 cooldown to carry into the next batch. The server is
+   * stateless, so without this a batch that ended mid-throttle would let the
+   * next one hit Roblox immediately.
+   */
+  throttleState?: SerializedThrottleState;
   stats: ScanStats;
 }
 
@@ -226,5 +233,7 @@ export interface ContinuousBatchPayload {
     friendRemaining: number;
     windowStartedAt: number;
   } | null;
+  /** Carried shared 429 cooldown from the previous batch's checkpoint. */
+  throttleState?: SerializedThrottleState | null;
   knownUniverseIds?: number[];
 }
