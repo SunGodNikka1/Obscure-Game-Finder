@@ -8,7 +8,13 @@ import { fetchUserPlaceInventoryPage } from "@/lib/roblox/inventory";
 import { getUsersByIds, resolveUsername, sanitizeUsername } from "@/lib/roblox/users";
 import { summarisePlayability } from "@/lib/playability";
 import { CONTINUOUS_CONFIG } from "@/lib/discovery/config";
-import { advanceInventoryListing } from "@/lib/discovery/inventoryPolicy";
+import {
+  advanceInventoryListing,
+  clearPlaceRetry,
+  isTransientPlaceFailure,
+  notePlaceTransientFailure,
+  prunePlaceRetries,
+} from "@/lib/discovery/inventoryPolicy";
 import { enforceRateLimit } from "@/lib/rateLimit";
 import {
   buildPlaceOnlyGame,
@@ -379,6 +385,9 @@ export async function POST(request: Request): Promise<Response> {
           const placeOnlyRecords: Array<{ placeId: number; name: string | null; created: string | null }> = [];
           if (pending.length > 0) {
             const slice = pending.splice(0, CONTINUOUS_CONFIG.PLACES_RESOLVED_PER_VISIT);
+            const placeRetries: Record<string, number> = { ...(work.placeRetries ?? {}) };
+            const retryLater: number[] = [];
+            const maxAttempts = CONTINUOUS_CONFIG.PLACE_TRANSIENT_ATTEMPTS;
             let resolved = 0;
             let attempted = 0;
             let throttledBack = 0;
@@ -399,8 +408,24 @@ export async function POST(request: Request): Promise<Response> {
                   throttledBack = unprocessed.length;
                   break;
                 }
+                if (isTransientPlaceFailure(error)) {
+                  // Network failure / timeout / 5xx says nothing about the place:
+                  // keep it queued for a later visit, a bounded number of times.
+                  const decision = notePlaceTransientFailure(placeRetries, placeId, maxAttempts);
+                  if (!decision.giveUp) {
+                    retryLater.push(placeId);
+                    log("warn", `[INV] place ${placeId} transient failure · retry ${decision.attempts}/${maxAttempts} kept queued`);
+                    continue;
+                  }
+                  log(
+                    "warn",
+                    `[INV] place ${placeId} unresolved after ${decision.attempts} transient attempts · preserved as partial record`,
+                  );
+                }
                 universeId = null;
               }
+              // Answered (resolved, or terminally unresolvable): retry state is done.
+              clearPlaceRetry(placeRetries, placeId);
               attempted += 1;
               if (universeId && !visitedGames.has(universeId)) {
                 record(universeId, "inventory", { rootPlaceId: placeId });
@@ -409,10 +434,15 @@ export async function POST(request: Request): Promise<Response> {
                 placeOnlyRecords.push({ placeId, name: null, created: null });
               }
             }
+            // Retries go to the back so healthy places are tried first next visit.
+            // The queue never grows: these ids were just taken off it.
+            pending.push(...retryLater);
+            work.placeRetries = prunePlaceRetries(placeRetries, pending);
             log(
               "info",
               `[INV] resolved ${resolved}/${attempted} place${attempted === 1 ? "" : "s"}` +
                 (throttledBack > 0 ? ` · ${throttledBack} kept queued (rate limited)` : "") +
+                (retryLater.length > 0 ? ` · ${retryLater.length} kept for retry (transient failure)` : "") +
                 (pending.length > 0 ? ` · ${pending.length} still queued for this user` : " · queue clear"),
             );
             emitStats();

@@ -8,7 +8,8 @@ import type { SerializedThrottleState } from "@/lib/roblox/throttle";
  * (fake timers), so multi-second cooldowns run instantly and deterministically.
  */
 const T0 = Date.parse("2026-09-22T12:00:00Z");
-type Rule = (url: URL) => { status: number; body?: unknown } | undefined;
+type Rule = (url: URL) => { status: number; body?: unknown } | "network" | "abort" | undefined;
+let abortController: AbortController | null = null;
 
 let rules: Rule[];
 let fetches: Array<{ url: string; at: number }>;
@@ -45,6 +46,11 @@ beforeEach(() => {
       const url = new URL(input);
       fetches.push({ url: input, at: Date.now() });
       const hit = rules.map((r) => r(url)).find(Boolean) ?? robloxOk(url);
+      if (hit === "network") throw new TypeError("fetch failed");
+      if (hit === "abort") {
+        abortController?.abort();
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
       return new Response(JSON.stringify(hit.body ?? {}), { status: hit.status });
     }),
   );
@@ -67,7 +73,10 @@ async function runBatch(payload: Partial<ContinuousBatchPayload>) {
     knownUniverseIds: [],
     ...payload,
   };
-  const response = await POST(new Request("http://localhost/api/scan-batch", { method: "POST", body: JSON.stringify(body) }));
+  abortController = new AbortController();
+  const response = await POST(
+    new Request("http://localhost/api/scan-batch", { method: "POST", body: JSON.stringify(body), signal: abortController.signal }),
+  );
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   let text = "";
@@ -156,5 +165,106 @@ describe("scan-batch under Roblox throttling", () => {
     const throttleState: SerializedThrottleState = { cooldownUntil: T0 - 1, level: 1, successes: 0, lastThrottleAt: T0 - 9_000 };
     await runBatch({ throttleState });
     expect(Math.min(...fetches.map((f) => f.at))).toBe(T0);
+  });
+});
+
+describe("transient failures during place resolution", () => {
+  const PLACE = 102; // stands in for live place 2534724415
+  const failPlace = (mode: "network" | "abort" | { status: number }) =>
+    rules.push((url) => (url.host === "apis.roblox.com" && url.pathname.includes(`/places/${PLACE}/`) ? mode : undefined));
+  /** A user whose listings are done and whose places are all pending, so only resolution runs. */
+  const pendingNode = (placeRetries?: Record<string, number>, pendingPlaceIds = [101, 102, 103]) => ({
+    ...node,
+    work: { createdDone: true, favoritesDone: true, inventoryDone: true, friendsDone: true, pendingPlaceIds, placeRetries },
+  });
+  const roundTrip = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+  it("1. a first network failure keeps the place queued (no partial record) with retry 1/3", async () => {
+    failPlace("network");
+    const { games, logs, work } = await runBatch({ nodes: [pendingNode()] });
+    expect(work?.work.pendingPlaceIds).toEqual([PLACE]);
+    expect(work?.work.placeRetries).toEqual({ [PLACE]: 1 });
+    expect(work?.hasMoreWork).toBe(true);
+    expect(games.some((g) => !g.universeKnown)).toBe(false);
+    expect(games.map((g) => g.universeId).sort()).toEqual([1010, 1030]); // 10. the others resolve normally
+    expect(logs).toContain(`[INV] place ${PLACE} transient failure · retry 1/3 kept queued`);
+  });
+
+  it("2/3. the count survives batch serialisation and increments on the next transient failure", async () => {
+    failPlace("network");
+    const first = await runBatch({ nodes: [pendingNode()] });
+    const carried = roundTrip(first.work!.work); // exactly what the browser sends back
+    const second = await runBatch({ nodes: [{ ...node, work: carried }] });
+    expect(second.work?.work.placeRetries).toEqual({ [PLACE]: 2 });
+    expect(second.work?.work.pendingPlaceIds).toEqual([PLACE]);
+    expect(second.logs).toContain(`[INV] place ${PLACE} transient failure · retry 2/3 kept queued`);
+  });
+
+  it("4. an eventual success resolves normally and clears the retry state", async () => {
+    const { games, work } = await runBatch({ nodes: [pendingNode({ [PLACE]: 2 })] });
+    expect(games.map((g) => g.universeId)).toContain(PLACE * 10);
+    expect(work?.work.pendingPlaceIds).toEqual([]);
+    expect(work?.work.placeRetries).toBeUndefined();
+    expect(work?.hasMoreWork).toBe(false);
+  });
+
+  it("5. the cap falls back to the partial record instead of looping forever", async () => {
+    failPlace("network");
+    const { games, logs, work } = await runBatch({ nodes: [pendingNode({ [PLACE]: 2 })] });
+    expect(games.filter((g) => !g.universeKnown).map((g) => g.rootPlaceId)).toEqual([PLACE]);
+    expect(work?.work.pendingPlaceIds).toEqual([]);
+    expect(work?.work.placeRetries).toBeUndefined();
+    expect(logs).toContain(`[INV] place ${PLACE} unresolved after 3 transient attempts · preserved as partial record`);
+  });
+
+  it("5xx is treated as transient too", async () => {
+    failPlace({ status: 503 });
+    const { work } = await runBatch({ nodes: [pendingNode()] });
+    expect(work?.work.placeRetries).toEqual({ [PLACE]: 1 });
+  });
+
+  it("6. a 429 keeps the place queued via the shared cooldown and does NOT use a retry", async () => {
+    failPlace({ status: 429 });
+    const { work } = await runBatch({ nodes: [pendingNode({ [PLACE]: 1 })] });
+    expect(work?.work.pendingPlaceIds).toContain(PLACE);
+    expect(work?.work.placeRetries).toEqual({ [PLACE]: 1 });
+  });
+
+  it("7. a throttle deferral does NOT use a retry", async () => {
+    failPlace({ status: 429 });
+    const { work, checkpoint } = await runBatch({
+      nodes: [pendingNode({ [PLACE]: 1 }, [PLACE, 103])],
+      // escalation already at level 3: the next 429 opens a 60s cooldown, which outlasts the batch
+      throttleState: { cooldownUntil: 0, level: 3, successes: 0, lastThrottleAt: T0 - 1_000 },
+    });
+    expect(checkpoint.throttleState?.cooldownUntil).toBeGreaterThan(Date.now());
+    expect(work?.work.pendingPlaceIds).toEqual([PLACE, 103]);
+    expect(work?.work.placeRetries).toEqual({ [PLACE]: 1 });
+  });
+
+  it("8. an abort mid-resolution uses no retry: the original work is re-queued untouched", async () => {
+    failPlace("abort");
+    const { checkpoint } = await runBatch({ nodes: [pendingNode({ [PLACE]: 1 })] });
+    expect(checkpoint.reason).toBe("aborted");
+    expect(checkpoint.processedUserIds).toEqual([]); // the browser re-queues the node with the work it sent
+    expect(checkpoint.nodeResults).toEqual([]);
+  });
+
+  it("9. a 404 keeps its terminal behaviour: partial record at once, no retry state", async () => {
+    failPlace({ status: 404 });
+    const { games, work } = await runBatch({ nodes: [pendingNode()] });
+    expect(games.filter((g) => !g.universeKnown).map((g) => g.rootPlaceId)).toEqual([PLACE]);
+    expect(work?.work.placeRetries).toBeUndefined();
+    expect(work?.work.pendingPlaceIds).toEqual([]);
+  });
+
+  it("11. never grows the pending queue past its size (backpressure cap intact)", async () => {
+    failPlace("network");
+    const full = Array.from({ length: 400 }, (_, i) => (i === 0 ? PLACE : 5_000 + i));
+    const { work } = await runBatch({ nodes: [pendingNode(undefined, full)] });
+    const pendingAfter = work!.work.pendingPlaceIds!;
+    expect(pendingAfter.length).toBe(400 - 15 + 1); // 15 taken, 14 answered, 1 kept for retry
+    expect(pendingAfter.at(-1)).toBe(PLACE); // retried places go to the back
+    expect(new Set(pendingAfter).size).toBe(pendingAfter.length);
   });
 });

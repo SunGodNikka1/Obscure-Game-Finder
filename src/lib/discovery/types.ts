@@ -132,6 +132,12 @@ export interface UserSourceWork {
   inventoryDone?: boolean;
   /** Inventory place ids discovered but not yet resolved to universe ids. */
   pendingPlaceIds?: number[];
+  /**
+   * Transient (network / timeout / 5xx) resolution failures per pending place,
+   * keyed by place id. Bounded by CONTINUOUS_CONFIG.PLACE_TRANSIENT_ATTEMPTS;
+   * travels with pendingPlaceIds so it survives batch boundaries.
+   */
+  placeRetries?: Record<string, number>;
   /** Friend list is fetched exactly once per user. */
   friendsDone?: boolean;
 }

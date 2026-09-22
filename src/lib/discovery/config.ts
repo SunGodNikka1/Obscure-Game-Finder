@@ -74,6 +74,13 @@ export const CONTINUOUS_CONFIG = {
    * drained room (see discovery/inventoryPolicy.ts). No returned id is lost.
    */
   MAX_PENDING_PLACES_PER_USER: 400,
+  /**
+   * Resolution attempts a pending place gets when each one fails TRANSIENTLY
+   * (network failure, timeout, 5xx). The place stays queued between attempts;
+   * after the last one it falls back to a partial record. 429s, throttle
+   * deferrals and aborts never count.
+   */
+  PLACE_TRANSIENT_ATTEMPTS: 3,
 
   /*
    * BATCH RETRY / PAUSE POLICY

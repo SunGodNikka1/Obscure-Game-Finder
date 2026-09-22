@@ -1,3 +1,4 @@
+import { RobloxApiError } from "@/lib/roblox/client";
 import { CONTINUOUS_CONFIG } from "./config";
 import type { UserSourceWork } from "./types";
 
@@ -105,4 +106,65 @@ export async function advanceInventoryListing(
   }
 
   return result;
+}
+
+/*
+ * TRANSIENT PLACE-RESOLUTION FAILURES
+ *
+ * A place->universe lookup that dies on the network (e.g. `fetch failed`,
+ * a timeout, a dropped connection) or on a 5xx says nothing about the
+ * place itself -- live, place 2534724415 failed that way and resolved
+ * normally minutes later. Such a place is kept queued and retried on a
+ * later visit, up to CONTINUOUS_CONFIG.PLACE_TRANSIENT_ATTEMPTS attempts;
+ * only then does it fall back to a partial record. 429 / throttle deferral
+ * are handled by the shared cooldown and aborts are not failures, so none of
+ * those count. Terminal answers (404 etc.) keep their existing behaviour.
+ */
+
+/** True for failures that say nothing about the place: no HTTP status (network / timeout) or a 5xx. */
+export function isTransientPlaceFailure(error: unknown): boolean {
+  if (error instanceof RobloxApiError) return error.status === null || error.status >= 500;
+  return false;
+}
+
+export interface PlaceRetryDecision {
+  /** Transient attempts used so far, including this one. */
+  attempts: number;
+  /** True when the allowance is spent: fall back to a partial record. */
+  giveUp: boolean;
+}
+
+/** Count one transient failure for `placeId` (mutates `retries`). Clears the entry on give-up. */
+export function notePlaceTransientFailure(
+  retries: Record<string, number>,
+  placeId: number,
+  maxAttempts: number = CONTINUOUS_CONFIG.PLACE_TRANSIENT_ATTEMPTS,
+): PlaceRetryDecision {
+  const key = String(placeId);
+  const previous = Number(retries[key]);
+  const attempts = (Number.isFinite(previous) && previous > 0 ? Math.floor(previous) : 0) + 1;
+  if (attempts >= maxAttempts) {
+    delete retries[key];
+    return { attempts, giveUp: true };
+  }
+  retries[key] = attempts;
+  return { attempts, giveUp: false };
+}
+
+/** Forget a place's retry state (resolved, or answered terminally). */
+export function clearPlaceRetry(retries: Record<string, number>, placeId: number): void {
+  delete retries[String(placeId)];
+}
+
+/** Keep only counters for places still pending; `undefined` when none remain (keeps payloads small). */
+export function prunePlaceRetries(
+  retries: Record<string, number>,
+  pending: ReadonlyArray<number>,
+): Record<string, number> | undefined {
+  const live = new Set(pending.map(String));
+  const kept: Record<string, number> = {};
+  for (const [key, value] of Object.entries(retries)) {
+    if (live.has(key) && Number.isFinite(value) && value > 0) kept[key] = Math.floor(value);
+  }
+  return Object.keys(kept).length > 0 ? kept : undefined;
 }

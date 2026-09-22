@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { CONTINUOUS_CONFIG } from "./config";
+import { RobloxApiError, RobloxThrottleDeferredError, ScanAbortedError } from "@/lib/roblox/client";
 import {
   INVENTORY_PAGE_SIZE,
   absorbInventoryPage,
   advanceInventoryListing,
+  clearPlaceRetry,
   hasRoomForInventoryPage,
+  isTransientPlaceFailure,
+  notePlaceTransientFailure,
+  prunePlaceRetries,
   type InventoryPageLike,
   type InventoryWork,
 } from "./inventoryPolicy";
@@ -219,5 +224,37 @@ describe("advanceInventoryListing (per-visit backpressure)", () => {
     const kept = pending.length - before;
     expect(kept).toBe(10);
     expect(PAGE - kept).toBe(40); // 40 ids silently gone once the cursor moved on
+  });
+});
+
+describe("transient place-resolution retries", () => {
+  it("classifies only status-less (network/timeout) and 5xx failures as transient", () => {
+    expect(isTransientPlaceFailure(new RobloxApiError("fetch failed", null, "x"))).toBe(true);
+    expect(isTransientPlaceFailure(new RobloxApiError("Request timed out", null, "x"))).toBe(true);
+    expect(isTransientPlaceFailure(new RobloxApiError("Roblox responded 503", 503, "x"))).toBe(true);
+    expect(isTransientPlaceFailure(new RobloxApiError("Not found", 404, "x"))).toBe(false);
+    expect(isTransientPlaceFailure(new RobloxApiError("private", 403, "x"))).toBe(false);
+    expect(isTransientPlaceFailure(new RobloxApiError("Rate limited by Roblox", 429, "x"))).toBe(false);
+    expect(isTransientPlaceFailure(new RobloxThrottleDeferredError("x", 1000))).toBe(false);
+    expect(isTransientPlaceFailure(new ScanAbortedError())).toBe(false);
+    expect(isTransientPlaceFailure(new Error("boom"))).toBe(false);
+  });
+
+  it("counts up to the cap, then gives up and clears the entry", () => {
+    const retries: Record<string, number> = {};
+    expect(notePlaceTransientFailure(retries, 2534724415, 3)).toEqual({ attempts: 1, giveUp: false });
+    expect(retries).toEqual({ "2534724415": 1 });
+    expect(notePlaceTransientFailure(retries, 2534724415, 3)).toEqual({ attempts: 2, giveUp: false });
+    expect(notePlaceTransientFailure(retries, 2534724415, 3)).toEqual({ attempts: 3, giveUp: true });
+    expect(retries).toEqual({});
+  });
+
+  it("tolerates malformed carried counters and prunes entries for places no longer pending", () => {
+    const retries: Record<string, number> = { "1": Number.NaN, "2": -4, "3": 1, "4": 2 };
+    expect(notePlaceTransientFailure(retries, 1, 3).attempts).toBe(1);
+    expect(notePlaceTransientFailure(retries, 2, 3).attempts).toBe(1);
+    clearPlaceRetry(retries, 3);
+    expect(prunePlaceRetries(retries, [1, 2])).toEqual({ "1": 1, "2": 1 });
+    expect(prunePlaceRetries({ "9": 1 }, [1])).toBeUndefined();
   });
 });
