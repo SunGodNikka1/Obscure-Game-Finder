@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { UiSoundHost } from "@/components/UiSoundHost";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -12,6 +13,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
+        <UiSoundHost />
         <div className="ogf-backdrop" aria-hidden />
         <div className="ogf-grain" aria-hidden />
         <div className="ogf-scanlines" aria-hidden />
